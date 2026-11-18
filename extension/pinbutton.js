@@ -138,4 +138,123 @@
   for (const ev of ["mousedown", "mouseup", "pointerdown", "pointerup"]) {
     btn.addEventListener(ev, (e) => e.stopPropagation());
   }
+
+  // ---------------------------------------------------------------- «Скачать доску» в шапке доски
+  // Встаёт перед кнопкой «Поделиться» и берёт у неё цвет, высоту и скругление,
+  // поэтому выглядит как родная и на своей доске, и на чужой.
+  const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
+    "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
+
+  function onBoardPage() {
+    const p = location.pathname.split("/").filter(Boolean);
+    return p.length >= 2 && !RESERVED.has(p[0]) && !RESERVED.has(p[1]);
+  }
+
+  function findShare() {
+    const tagged = document.querySelector('[data-test-id="share-board-button"]');
+    if (tagged) return tagged;
+    const header = document.querySelector('[data-test-id="board-actions"], [data-test-id="board-header"]');
+    return header && header.querySelector('button[aria-label^="Поделиться"], button[aria-label^="Share"]');
+  }
+
+  // элемент ряда кнопок, в котором лежит «Поделиться»
+  function rowItem(share) {
+    let el = share;
+    while (el.parentElement && el.parentElement.children.length < 2) el = el.parentElement;
+    return el;
+  }
+
+  const boardBtn = document.createElement("button");
+  boardBtn.type = "button";
+  boardBtn.dataset.pinboardDl = "board";
+  boardBtn.title = "Скачать всю доску через Pinterest Board Downloader";
+  boardBtn.innerHTML = '<svg viewBox="0 0 24 24" width="18" height="18" aria-hidden="true">' +
+    '<path fill="currentColor" d="M11 3h2v9.6l3.3-3.3 1.4 1.4L12 16.4l-5.7-5.7 1.4-1.4 3.3 3.3V3zM5 19h14v2H5z"/></svg>' +
+    "<span>Скачать доску</span>";
+  const boardLabel = boardBtn.querySelector("span");
+  let boardBusy = false;
+
+  const opaque = (c) => c && c !== "transparent" && !/rgba\([^)]*,\s*0(\.0+)?\)$/.test(c);
+
+  // Цвет у кнопок Pinterest задаёт не сама <button>, а вложенный элемент — ищем его.
+  function styleLike(share) {
+    let face = null;
+    for (const el of [share, ...share.querySelectorAll("*")]) {
+      if (el instanceof SVGElement) continue;
+      if (opaque(getComputedStyle(el).backgroundColor)) { face = el; break; }
+    }
+    const cs = getComputedStyle(face || share);
+    const r = (face || share).getBoundingClientRect();
+    Object.assign(boardBtn.style, {
+      display: "inline-flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap", boxSizing: "border-box",
+      height: Math.round(r.height || 48) + "px", padding: "0 16px", border: "0", margin: "0",
+      borderRadius: face && cs.borderRadius !== "0px" ? cs.borderRadius : "16px",
+      background: face ? cs.backgroundColor : "#e9e9e9",
+      color: face ? cs.color : "#111",
+      font: "600 14px/1 system-ui, -apple-system, Segoe UI, sans-serif", cursor: "pointer",
+    });
+  }
+
+  // выравниваем по верхнему краю «Поделиться»
+  function alignWith(share) {
+    const target = (share.querySelector("button") || share).getBoundingClientRect().top;
+    const delta = Math.round(target - boardBtn.getBoundingClientRect().top);
+    if (delta) boardBtn.style.marginTop = (parseFloat(boardBtn.style.marginTop) || 0) + delta + "px";
+  }
+
+  function ensureBoardButton() {
+    if (!onBoardPage()) {
+      boardBtn.remove();
+      return;
+    }
+    const share = findShare();
+    if (!share) return;
+    const item = rowItem(share);
+    if (boardBtn.isConnected && boardBtn.nextElementSibling === item) return;
+    styleLike(share);
+    // в ряду кнопок у Pinterest небольшие отступы между элементами — повторяем их
+    const gap = getComputedStyle(item.parentElement).columnGap;
+    if (!gap || gap === "normal" || gap === "0px") boardBtn.style.marginRight = "8px";
+    item.parentElement.insertBefore(boardBtn, item);
+    alignWith(share);
+  }
+
+  boardBtn.addEventListener("click", (e) => {
+    e.preventDefault();
+    e.stopPropagation();
+    if (boardBusy) return;
+    boardBusy = true;
+    boardLabel.textContent = "Собираю пины…";
+    let timer = null;
+    const finish = (text) => {
+      chrome.storage.onChanged.removeListener(watch);
+      clearTimeout(timer);
+      boardLabel.textContent = text;
+      setTimeout(() => {
+        boardBusy = false;
+        boardLabel.textContent = "Скачать доску";
+      }, 2500);
+    };
+    const watch = (ch, area) => {
+      const st = area === "local" && ch.status && ch.status.newValue;
+      if (!st) return;
+      if (st.error) finish("Ошибка");
+      else if (st.done) finish("✓ В очереди");
+    };
+    chrome.storage.onChanged.addListener(watch);
+    timer = setTimeout(() => finish("Скачать доску"), 120000);
+    chrome.runtime.sendMessage({ type: "download", url: location.href });
+  });
+
+  // Pinterest перерисовывает страницу без перезагрузки — следим и возвращаем кнопку на место
+  let queued = false;
+  new MutationObserver(() => {
+    if (queued) return;
+    queued = true;
+    requestAnimationFrame(() => {
+      queued = false;
+      ensureBoardButton();
+    });
+  }).observe(document.documentElement, { childList: true, subtree: true });
+  ensureBoardButton();
 })();

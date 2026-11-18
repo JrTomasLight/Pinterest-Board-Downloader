@@ -593,8 +593,27 @@ const seen = new Set();
 let running = false;
 let currentKey = null;
 
-// Доски и пины, которые ждут своей очереди, — их можно убрать, не дожидаясь.
+// Доски и пины, которые ждут своей очереди: пронумерованы в порядке скачивания,
+// порядок меняется перетаскиванием мышью, ненужное можно убрать.
+let dragging = null;     // строка, которую сейчас тащат
+let renderLater = false; // очередь поменялась во время перетаскивания — перерисуем после
+
+function renumber() {
+  $("queue").querySelectorAll(".qrow").forEach((row, i) => {
+    row.querySelector(".qnum").textContent = i + 1;
+  });
+}
+
+async function saveOrder() {
+  const keys = [...$("queue").querySelectorAll(".qrow")].map((r) => r.dataset.key);
+  await chrome.runtime.sendMessage({ type: "reorder", keys });
+}
+
 async function renderQueue() {
+  if (dragging) {
+    renderLater = true;
+    return;
+  }
   const { pending = [] } = await chrome.storage.local.get("pending");
   const waiting = pending.filter((p) => p.key !== currentKey && !seen.has(p.key));
   const box = $("queue");
@@ -604,24 +623,61 @@ async function renderQueue() {
   if (!waiting.length) return;
   const h = document.createElement("h3");
   h.textContent = `В очереди: ${waiting.length}`;
+  if (waiting.length > 1) {
+    const tip = document.createElement("small");
+    tip.textContent = "Порядок можно менять, перетаскивая мышью";
+    h.append(tip);
+  }
   box.append(h);
-  for (const p of waiting) {
+  waiting.forEach((p, i) => {
     const row = document.createElement("div");
     row.className = "qrow";
-    const name = document.createElement("span");
-    name.textContent = p.data.title;
+    row.dataset.key = p.key;
+    row.draggable = waiting.length > 1;
+    row.innerHTML = `<svg class="grip" viewBox="0 0 10 16" aria-hidden="true"><g fill="currentColor">` +
+      `<circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/>` +
+      `<circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></g></svg>` +
+      `<span class="qnum"></span><span class="qname"></span>`;
+    row.querySelector(".qnum").textContent = i + 1;
+    row.querySelector(".qname").textContent = p.data.title;
     const rm = document.createElement("button");
     rm.type = "button";
     rm.textContent = "Убрать";
+    rm.draggable = false;
     rm.addEventListener("click", async () => {
       rm.disabled = true;
       seen.add(p.key);
       await chrome.runtime.sendMessage({ type: "taken", key: p.key });
       renderQueue();
     });
-    row.append(name, rm);
+    row.append(rm);
+
+    row.addEventListener("dragstart", (e) => {
+      dragging = row;
+      row.classList.add("dragging");
+      e.dataTransfer.effectAllowed = "move";
+      e.dataTransfer.setData("text/plain", p.key);
+    });
+    row.addEventListener("dragover", (e) => {
+      if (!dragging || dragging === row) return;
+      e.preventDefault();
+      const r = row.getBoundingClientRect();
+      const after = e.clientY > r.top + r.height / 2;
+      row.parentElement.insertBefore(dragging, after ? row.nextSibling : row);
+      renumber();
+    });
+    row.addEventListener("drop", (e) => e.preventDefault());
+    row.addEventListener("dragend", async () => {
+      row.classList.remove("dragging");
+      dragging = null;
+      await saveOrder();
+      if (renderLater) {
+        renderLater = false;
+        renderQueue();
+      }
+    });
     box.append(row);
-  }
+  });
 }
 
 async function run() {

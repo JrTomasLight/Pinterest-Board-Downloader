@@ -133,6 +133,14 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       await chrome.storage.local.set({ pending });
       await setStatus({ text: `${msg.data.title}: загрузка идёт во вкладке загрузок.`, done: true });
       await openDownloader();
+    } else if (msg.type === "reorder") {
+      // новый порядок ожидающих загрузок; то, чего нет в списке (текущая или только что
+      // добавленная загрузка), остаётся после них
+      const { pending = [] } = await chrome.storage.local.get("pending");
+      const pos = new Map(msg.keys.map((k, i) => [k, i]));
+      const listed = pending.filter((p) => pos.has(p.key)).sort((a, b) => pos.get(a.key) - pos.get(b.key));
+      const rest = pending.filter((p) => !pos.has(p.key));
+      await chrome.storage.local.set({ pending: [...listed, ...rest] });
     } else if (msg.type === "taken") {
       const { pending = [] } = await chrome.storage.local.get("pending");
       await chrome.storage.local.set({ pending: pending.filter((p) => p.key !== msg.key) });
