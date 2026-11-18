@@ -230,11 +230,72 @@ async function syncFolder(folder, dir, stats) {
   return jobs;
 }
 
+// Без ограничений по времени один зависший ответ сервера останавливает всю очередь.
+const CONNECT_TIMEOUT = 30000; // ждём начала ответа
+const STALL_TIMEOUT = 45000;   // ждём следующего куска данных
+const HEAD_TIMEOUT = 15000;
+const ATTEMPTS = 3;
+
+class Stalled extends Error {}
+class Cancelled extends Error {}
+
+// Сигнал отмены текущей доски: доски качаются по одной, поэтому хватает одного.
+let activeSignal = null;
+const checkCancel = () => {
+  if (activeSignal && activeSignal.aborted) throw new Cancelled("отменено");
+};
+const withCancel = (signal) => (activeSignal ? AbortSignal.any([signal, activeSignal]) : signal);
+
+const sleep = async (ms) => {
+  await new Promise((r) => {
+    const t = setTimeout(r, ms);
+    if (activeSignal) activeSignal.addEventListener("abort", () => { clearTimeout(t); r(); }, { once: true });
+  });
+  checkCancel();
+};
+
+// Читает тело ответа по кускам; если данные перестали идти — обрывает запрос.
+async function readBody(resp, onChunk) {
+  const reader = resp.body.getReader();
+  let timer;
+  try {
+    while (true) {
+      const stall = new Promise((_, reject) => {
+        timer = setTimeout(() => {
+          resp._ctrl.abort();
+          reject(new Stalled("сервер перестал отвечать"));
+        }, STALL_TIMEOUT);
+      });
+      let res;
+      try {
+        res = await Promise.race([reader.read(), stall]);
+      } catch (e) {
+        checkCancel();
+        throw e;
+      }
+      const { done, value } = res;
+      clearTimeout(timer);
+      if (done) return;
+      await onChunk(value);
+    }
+  } finally {
+    clearTimeout(timer);
+    try { reader.releaseLock(); } catch { /* поток уже закрыт */ }
+  }
+}
+
+async function readAll(resp) {
+  const parts = [];
+  await readBody(resp, (c) => parts.push(c));
+  return new Blob(parts);
+}
+
 async function writeResponse(dir, name, resp) {
   const fh = await dir.getFileHandle(name, { create: true });
   const w = await fh.createWritable();
   try {
-    await resp.body.pipeTo(w);
+    await readBody(resp, (chunk) => w.write(chunk));
+    await w.close();
   } catch (e) {
     try { await w.abort(); } catch { /* уже закрыт */ }
     try { await dir.removeEntry(name); } catch { /* нет файла */ }
@@ -249,27 +310,44 @@ async function writeText(dir, name, text) {
   await w.close();
 }
 
+class HttpError extends Error {}
+
 async function get(url) {
   let last;
-  for (let i = 0; i < 3; i++) {
+  for (let i = 0; i < ATTEMPTS; i++) {
+    checkCancel();
+    const ctrl = new AbortController();
+    const timer = setTimeout(() => ctrl.abort(), CONNECT_TIMEOUT);
+    if (activeSignal) activeSignal.addEventListener("abort", () => ctrl.abort(), { once: true });
     try {
-      const r = await fetch(url);
-      if (r.ok) return r;
-      last = new Error(`HTTP ${r.status}`);
+      const r = await fetch(url, { signal: ctrl.signal });
+      clearTimeout(timer);
+      if (r.ok) {
+        r._ctrl = ctrl; // чтобы оборвать загрузку, если данные перестанут идти
+        return r;
+      }
+      last = new HttpError(`HTTP ${r.status}`);
       if (r.status === 403 || r.status === 404) break;
     } catch (e) {
-      last = e;
+      clearTimeout(timer);
+      checkCancel();
+      last = e.name === "AbortError" ? new Stalled("сервер не отвечает") : e;
     }
-    await new Promise((r) => setTimeout(r, 1500 * (i + 1)));
+    await sleep(1500 * (i + 1));
   }
   throw last;
 }
 
 async function head(url) {
+  const ctrl = new AbortController();
+  const timer = setTimeout(() => ctrl.abort(), HEAD_TIMEOUT);
   try {
-    return (await fetch(url, { method: "HEAD" })).ok;
+    return (await fetch(url, { method: "HEAD", signal: withCancel(ctrl.signal) })).ok;
   } catch {
+    checkCancel();
     return false;
+  } finally {
+    clearTimeout(timer);
   }
 }
 
@@ -290,7 +368,8 @@ async function saveHls(dir, stem, url) {
     }
   }
   // запасной вариант — склеиваем поток в .ts (открывается в VLC и большинстве плееров)
-  let playlist = await (await get(url)).text();
+  const text = async (u) => (await readAll(await get(u))).text();
+  let playlist = await text(url);
   if (playlist.includes("#EXT-X-STREAM-INF")) {
     let best = null, bw = -1;
     const lines = playlist.split(/\r?\n/);
@@ -299,17 +378,21 @@ async function saveHls(dir, stem, url) {
       if (m && lines[i + 1] && +m[1] > bw) { bw = +m[1]; best = new URL(lines[i + 1], url).href; }
     });
     url = best;
-    playlist = await (await get(url)).text();
+    playlist = await text(url);
   }
   const segs = playlist.split(/\r?\n/).filter((l) => l && !l.startsWith("#")).map((l) => new URL(l, url).href);
   const name = stem + ".ts";
   const fh = await dir.getFileHandle(name, { create: true });
   const w = await fh.createWritable();
   try {
-    for (const s of segs) await w.write(await (await get(s)).arrayBuffer());
+    for (const s of segs) {
+      checkCancel();
+      await w.write(await readAll(await get(s)));
+    }
     await w.close();
   } catch (e) {
     try { await w.abort(); } catch { /* */ }
+    try { await dir.removeEntry(name); } catch { /* нет файла */ }
     throw e;
   }
   return name;
@@ -322,12 +405,28 @@ async function saveMedia(dir, m) {
     resp = await get(m.url);
   } catch (e) {
     // оригинала картинки иногда нет — берём 736px
-    if (m.kind === "image" && m.url.includes("/originals/")) resp = await get(m.url.replace("/originals/", "/736x/"));
-    else throw e;
+    if (e instanceof HttpError && m.kind === "image" && m.url.includes("/originals/")) {
+      resp = await get(m.url.replace("/originals/", "/736x/"));
+    } else {
+      throw e;
+    }
   }
   const name = m.stem + extOf(m.url, m.kind);
   await writeResponse(dir, name, resp);
   return name;
+}
+
+// Если загрузка оборвалась посередине (сервер замолчал, пропала сеть) — начинаем файл заново.
+// На 403/404 повторять бессмысленно: файла на сервере нет.
+async function saveWithRetry(dir, m) {
+  for (let i = 1; ; i++) {
+    try {
+      return await saveMedia(dir, m);
+    } catch (e) {
+      if (e instanceof HttpError || e instanceof Cancelled || i >= ATTEMPTS) throw e;
+      await sleep(3000 * i);
+    }
+  }
 }
 
 // ------------------------------------------------------------ index.html
@@ -361,11 +460,18 @@ h1{font-size:22px;margin:0 0 12px} ul{padding-left:18px}
 }
 
 // ------------------------------------------------------------ интерфейс доски
-function boardView(board) {
+function boardView(board, onCancel) {
   const el = document.createElement("section");
   el.className = "board";
-  el.innerHTML = `<h2></h2><div class="bar"><i></i></div><div class="row"><span class="st"></span><span class="er"></span></div>`;
+  el.innerHTML = `<div class="head"><h2></h2><button class="cancel" type="button">Отменить</button></div>` +
+    `<div class="bar"><i></i></div><div class="row"><span class="st"></span><span class="er"></span></div>`;
   el.querySelector("h2").textContent = board.title;
+  const cancelBtn = el.querySelector(".cancel");
+  cancelBtn.addEventListener("click", () => {
+    cancelBtn.disabled = true;
+    cancelBtn.textContent = "Отменяю…";
+    onCancel();
+  });
   if (board.gated) {
     const w = document.createElement("p");
     w.className = "warn";
@@ -380,19 +486,24 @@ function boardView(board) {
   details.innerHTML = "<summary>Что не скачалось</summary>";
   el.append(details);
   $("boards").prepend(el);
+  const st = el.querySelector(".st");
   return {
     status(text) {
-      el.querySelector(".st").textContent = text;
+      st.textContent = text;
     },
     note(text) {
       noteEl.textContent = text;
     },
-    update(done, total, failed, finished) {
+    update(done, total, failed) {
       el.querySelector(".bar i").style.width = (total ? ((done + failed) / total) * 100 : 100) + "%";
-      const st = el.querySelector(".st");
-      st.textContent = `${finished ? "Готово" : "Скачиваю…"} ${done} из ${total}`;
-      st.className = "st" + (finished ? " done" : "");
+      st.textContent = `Скачиваю… ${done} из ${total}`;
       el.querySelector(".er").textContent = failed ? `ошибок: ${failed}` : "";
+    },
+    finish(text, cls) {
+      cancelBtn.remove();
+      st.textContent = text;
+      st.className = "st " + cls;
+      if (cls === "cancelled") el.classList.add("is-cancelled");
     },
     error(text) {
       details.hidden = false;
@@ -403,14 +514,15 @@ function boardView(board) {
   };
 }
 
-async function downloadBoard(board) {
-  const view = boardView(board);
+async function downloadBoard(board, view) {
+  const signal = activeSignal || new AbortController().signal;
   view.status("Сверяю с уже скачанным…");
   dirCache.clear(); // папки разделов могли переименоваться
   const stats = { total: 0, done: 0, renamed: 0, removed: 0 };
   const jobs = [];
   await renumberSections(board.folders[0]);
   for (const folder of board.folders) {
+    checkCancel();
     jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats)));
   }
   const total = stats.total;
@@ -421,23 +533,25 @@ async function downloadBoard(board) {
   if (stats.removed) notes.push(`убрано в «${REMOVED_DIR}»: ${stats.removed}`);
   if (jobs.length) notes.push(`новых: ${jobs.length}`);
   view.note(notes.join(", "));
-  view.update(done, total, failed, false);
+  view.update(done, total, failed);
 
   let next = 0;
   async function worker() {
-    while (next < jobs.length) {
+    while (next < jobs.length && !signal.aborted) {
       const j = jobs[next++];
       try {
-        j.pin.files[j.k] = await saveMedia(j.dir, j.m);
+        j.pin.files[j.k] = await saveWithRetry(j.dir, j.m);
         done++;
       } catch (e) {
+        if (signal.aborted) return; // отмена — не ошибка
         failed++;
         view.error(`${j.pin.link} — ${e.message || e}`);
       }
-      view.update(done, total, failed, false);
+      view.update(done, total, failed);
     }
   }
   await Promise.all(Array.from({ length: PARALLEL }, worker));
+  checkCancel();
 
   for (const folder of board.folders) {
     if (folder.single) continue; // для отдельных пинов галерея не нужна
@@ -451,42 +565,96 @@ async function downloadBoard(board) {
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
   }
-  view.update(done, total, failed, true);
+  return { done, total, failed };
 }
 
 // ------------------------------------------------------------ очередь досок
 const seen = new Set();
 let running = false;
+let currentKey = null;
+
+// Доски и пины, которые ждут своей очереди, — их можно убрать, не дожидаясь.
+async function renderQueue() {
+  const { pending = [] } = await chrome.storage.local.get("pending");
+  const waiting = pending.filter((p) => p.key !== currentKey && !seen.has(p.key));
+  const box = $("queue");
+  box.innerHTML = "";
+  box.hidden = !waiting.length;
+  if (!waiting.length) return;
+  const h = document.createElement("h3");
+  h.textContent = `В очереди: ${waiting.length}`;
+  box.append(h);
+  for (const p of waiting) {
+    const row = document.createElement("div");
+    row.className = "qrow";
+    const name = document.createElement("span");
+    name.textContent = p.data.title;
+    const rm = document.createElement("button");
+    rm.type = "button";
+    rm.textContent = "Убрать";
+    rm.addEventListener("click", async () => {
+      rm.disabled = true;
+      seen.add(p.key);
+      await chrome.runtime.sendMessage({ type: "taken", key: p.key });
+      renderQueue();
+    });
+    row.append(name, rm);
+    box.append(row);
+  }
+}
 
 async function run() {
   if (running) return;
-  if (!(await ensureRoot())) return;
-  running = true;
+  running = true; // ставим сразу: пока ждём папку, могут прийти новые доски
+  if (!(await ensureRoot())) {
+    running = false;
+    return;
+  }
   try {
     while (true) {
       const { pending = [] } = await chrome.storage.local.get("pending");
       const item = pending.find((p) => !seen.has(p.key));
       if (!item) break;
       seen.add(item.key);
+      currentKey = item.key;
+      renderQueue();
+
+      const ctrl = new AbortController();
+      activeSignal = ctrl.signal;
+      const view = boardView(item.data, () => ctrl.abort());
       try {
-        await downloadBoard(item.data);
+        const r = await downloadBoard(item.data, view);
+        view.finish(`Готово ${r.done} из ${r.total}`, "done");
       } catch (e) {
-        boardView(item.data).error("Не удалось сохранить: " + (e.message || e));
+        if (ctrl.signal.aborted) {
+          view.finish("Отменено. Уже скачанное осталось в папке, повторный запуск докачает остальное.", "cancelled");
+        } else {
+          view.finish("Не удалось сохранить", "failed");
+          view.error(e.message || String(e));
+        }
+      } finally {
+        activeSignal = null;
+        currentKey = null;
       }
       await chrome.runtime.sendMessage({ type: "taken", key: item.key });
     }
   } finally {
     running = false;
+    renderQueue();
   }
 }
 
 chrome.storage.onChanged.addListener((ch, area) => {
-  if (area === "local" && ch.pending) run();
+  if (area === "local" && ch.pending) {
+    renderQueue();
+    run();
+  }
 });
 $("pick").addEventListener("click", pickFolder);
 
 (async () => {
   const saved = await loadRoot().catch(() => null);
   if (saved) $("folderName").textContent = saved.name;
+  renderQueue();
   run();
 })();

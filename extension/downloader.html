@@ -34,6 +34,17 @@
   details { color:var(--muted); margin-top:6px; }
   details div { word-break:break-all; font-size:12px; }
   .hint { color:var(--muted); margin-top:20px; }
+  .board .head { display:flex; align-items:center; justify-content:space-between; gap:12px; }
+  .cancel { padding:5px 12px; font-size:13px; flex:none; }
+  .cancel:hover:not(:disabled) { background:var(--accent); color:#fff; }
+  .cancel:disabled { opacity:.6; cursor:default; }
+  .st.cancelled, .st.failed { color:var(--warn); }
+  .board.is-cancelled .bar i { background:var(--muted); }
+  #queue { margin-top:16px; border:1px solid var(--line); border-radius:12px; padding:10px 14px; }
+  #queue h3 { font-size:13px; color:var(--muted); font-weight:600; margin:0 0 6px; }
+  .qrow { display:flex; align-items:center; justify-content:space-between; gap:12px; padding:4px 0; }
+  .qrow span { overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .qrow button { padding:4px 12px; font-size:13px; flex:none; }
 </style>
 </head>
 <body>
@@ -53,6 +64,7 @@
     <p id="needText"></p>
     <button id="grant" class="primary">Продолжить</button>
   </div>
+  <div id="queue" hidden></div>
   <div id="boards"></div>
   <p class="hint">Не закрывайте эту вкладку, пока идёт загрузка. Следующие доски и пины можно добавлять
     кнопкой расширения, кнопкой «Скачать» на пине или правой кнопкой мыши по пину. Они встанут в очередь.</p>
