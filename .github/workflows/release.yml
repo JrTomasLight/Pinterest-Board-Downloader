@@ -47,6 +47,8 @@ jobs:
             echo "::error::В CHANGELOG.md нет раздела «## $VER». Добавьте описание версии и отправьте тег заново."
             exit 1
           fi
+          # одинаковый для всех релизов блок установки и обновления
+          sed "s/{VERSION}/$VER/g" .github/release-template.md >> notes.md
           cat notes.md
 
       - name: Опубликовать релиз
