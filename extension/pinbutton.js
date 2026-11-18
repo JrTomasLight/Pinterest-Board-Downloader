@@ -150,17 +150,38 @@
     return p.length >= 2 && !RESERVED.has(p[0]) && !RESERVED.has(p[1]);
   }
 
+  const visible = (el) => el && el.getClientRects().length > 0;
+
+  // Кнопка в шапке доски, перед которой встаём. У секретной доски «Поделиться» нет,
+  // поэтому дальше пробуем «•••» и любую другую кнопку из блока действий доски.
+  const BLOCKS = '[data-test-id="board-actions"], [data-test-id="board-actions-container"], [data-test-id="board-header"]';
+
   function findShare() {
-    const tagged = document.querySelector('[data-test-id="share-board-button"]');
-    if (tagged) return tagged;
-    const header = document.querySelector('[data-test-id="board-actions"], [data-test-id="board-header"]');
-    return header && header.querySelector('button[aria-label^="Поделиться"], button[aria-label^="Share"]');
+    // у публичной доски есть «Поделиться», у секретной — только «•••» со своей меткой
+    for (const id of ["share-board-button", "more-board-options"]) {
+      const tagged = [...document.querySelectorAll(`[data-test-id="${id}"]`)].find(visible);
+      if (tagged) return tagged;
+    }
+    const BTN = 'button, [role="button"]';
+    for (const header of document.querySelectorAll(BLOCKS)) {
+      const pick = (sel) => [...header.querySelectorAll(sel)].find((b) => visible(b) && !boardBtn.contains(b));
+      const found = pick('[aria-label^="Поделиться"], [aria-label^="Share"]') ||
+        pick('[aria-label*="вариант" i], [aria-label*="options" i], [aria-label*="ещё" i], [aria-label*="more" i]');
+      if (found) return found.closest(BTN) || found;
+    }
+    return null;
   }
 
-  // элемент ряда кнопок, в котором лежит «Поделиться»
+  // элемент ряда кнопок, в котором лежит кнопка-ориентир; выше блока действий не поднимаемся
   function rowItem(share) {
+    const stop = share.closest(BLOCKS);
+    // ближайший горизонтальный flex-ряд — даже если кнопка в нём одна (секретная доска)
+    for (let el = share; el && el !== stop && el.parentElement; el = el.parentElement) {
+      const cs = getComputedStyle(el.parentElement);
+      if (cs.display.includes("flex") && !cs.flexDirection.startsWith("column")) return el;
+    }
     let el = share;
-    while (el.parentElement && el.parentElement.children.length < 2) el = el.parentElement;
+    while (el.parentElement && el.parentElement !== stop && el.parentElement.children.length < 2) el = el.parentElement;
     return el;
   }
 
