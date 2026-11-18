@@ -4,6 +4,21 @@
 const PARALLEL = 4;
 const $ = (id) => document.getElementById(id);
 
+// ------------------------------------------------------------ версия и ссылки
+const REPO = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
+const VERSION = chrome.runtime.getManifest ? chrome.runtime.getManifest().version : "";
+if ($("ver")) {
+  $("ver").textContent = VERSION ? "v" + VERSION : "";
+  $("verFoot").textContent = VERSION ? `Версия ${VERSION}` : "";
+  $("repo").href = $("repoFoot").href = REPO;
+  $("issues").href = REPO + "/issues";
+}
+
+// «Пока ничего не скачивается» — если нет ни загрузок, ни очереди
+function updateEmpty() {
+  $("empty").hidden = $("boards").children.length > 0 || !$("queue").hidden;
+}
+
 // ------------------------------------------------------------ папка (хранится в IndexedDB)
 function idb(mode, fn) {
   return new Promise((resolve, reject) => {
@@ -462,10 +477,14 @@ h1{font-size:22px;margin:0 0 12px} ul{padding-left:18px}
 // ------------------------------------------------------------ интерфейс доски
 function boardView(board, onCancel) {
   const el = document.createElement("section");
-  el.className = "board";
-  el.innerHTML = `<div class="head"><h2></h2><button class="cancel" type="button">Отменить</button></div>` +
+  el.className = "card board";
+  el.innerHTML = `<div class="head"><h2></h2><span class="kind"></span><button class="cancel" type="button">Отменить</button></div>` +
     `<div class="bar"><i></i></div><div class="row"><span class="st"></span><span class="er"></span></div>`;
   el.querySelector("h2").textContent = board.title;
+  const single = board.folders[0] && board.folders[0].single;
+  const sections = board.folders.length - 1;
+  el.querySelector(".kind").textContent = single ? (board.found > 1 ? "Пины" : "Пин")
+    : sections > 0 ? `Доска · разделов: ${sections}` : "Доска";
   const cancelBtn = el.querySelector(".cancel");
   cancelBtn.addEventListener("click", () => {
     cancelBtn.disabled = true;
@@ -486,6 +505,7 @@ function boardView(board, onCancel) {
   details.innerHTML = "<summary>Что не скачалось</summary>";
   el.append(details);
   $("boards").prepend(el);
+  updateEmpty();
   const st = el.querySelector(".st");
   return {
     status(text) {
@@ -503,7 +523,7 @@ function boardView(board, onCancel) {
       cancelBtn.remove();
       st.textContent = text;
       st.className = "st " + cls;
-      if (cls === "cancelled") el.classList.add("is-cancelled");
+      el.classList.add("is-" + cls);
     },
     error(text) {
       details.hidden = false;
@@ -580,6 +600,7 @@ async function renderQueue() {
   const box = $("queue");
   box.innerHTML = "";
   box.hidden = !waiting.length;
+  updateEmpty();
   if (!waiting.length) return;
   const h = document.createElement("h3");
   h.textContent = `В очереди: ${waiting.length}`;

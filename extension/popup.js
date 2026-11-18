@@ -61,5 +61,7 @@ $("form").addEventListener("submit", (e) => {
   $("url").value = "";
 });
 $("open").addEventListener("click", () => chrome.runtime.sendMessage({ type: "open" }));
+$("ver").textContent = "v" + chrome.runtime.getManifest().version;
+$("repo").href = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
 
 load();
