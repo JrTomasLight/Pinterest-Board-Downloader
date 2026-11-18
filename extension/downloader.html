@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<title>Pinterest Board Downloader — загрузки</title>
+<link rel="icon" href="icons/48.png">
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#666; --line:#e6e6e6; --accent:#e60023; --bar:#f0f0f0; --ok:#1a7f37; --warn:#a15c00; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#161616; --fg:#eee; --muted:#aaa; --line:#2e2e2e; --bar:#2a2a2a; --ok:#5fd27a; --warn:#f0b35a; }
+  }
+  body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:24px 16px; }
+  header { display:flex; align-items:center; gap:12px; margin:0 0 18px; }
+  h1 { font-size:20px; margin:0; }
+  .sub { color:var(--muted); margin:2px 0 0; }
+  .folder { display:flex; gap:12px; align-items:center; justify-content:space-between; flex-wrap:wrap;
+            border:1px solid var(--line); border-radius:12px; padding:12px 14px; }
+  .folder span { color:var(--muted); }
+  .folder b { color:var(--fg); }
+  button { font:inherit; border:0; border-radius:20px; padding:8px 16px; cursor:pointer; background:var(--bar); color:var(--fg); }
+  button.primary { background:var(--accent); color:#fff; font-weight:600; }
+  #need { margin:16px 0 0; padding:14px; border-radius:12px; background:var(--bar); }
+  #need p { margin:0 0 10px; }
+  .board { border-top:1px solid var(--line); margin-top:16px; padding-top:14px; }
+  .board h2 { font-size:15px; margin:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
+  .bar { height:8px; background:var(--bar); border-radius:4px; overflow:hidden; margin:8px 0 6px; }
+  .bar i { display:block; height:100%; width:0; background:var(--accent); transition:width .2s; }
+  .row { display:flex; justify-content:space-between; color:var(--muted); gap:12px; }
+  .done { color:var(--ok); }
+  .warn { color:var(--warn); margin:6px 0 0; }
+  .note { color:var(--muted); margin:4px 0 0; font-size:13px; }
+  .note:empty { display:none; }
+  details { color:var(--muted); margin-top:6px; }
+  details div { word-break:break-all; font-size:12px; }
+  .hint { color:var(--muted); margin-top:20px; }
+</style>
+</head>
+<body>
+<main>
+  <header>
+    <img src="icons/48.png" alt="" width="32" height="32">
+    <div>
+      <h1>Pinterest Board Downloader</h1>
+      <p class="sub">Загрузка досок и отдельных пинов</p>
+    </div>
+  </header>
+  <div class="folder">
+    <span>Папка: <b id="folderName">не выбрана</b></span>
+    <button id="pick">Выбрать папку</button>
+  </div>
+  <div id="need" hidden>
+    <p id="needText"></p>
+    <button id="grant" class="primary">Продолжить</button>
+  </div>
+  <div id="boards"></div>
+  <p class="hint">Не закрывайте эту вкладку, пока идёт загрузка. Следующие доски и пины можно добавлять
+    кнопкой расширения, кнопкой «Скачать» на пине или правой кнопкой мыши по пину. Они встанут в очередь.</p>
+</main>
+<script src="downloader.js"></script>
+</body>
+</html>

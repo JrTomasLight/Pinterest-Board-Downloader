@@ -1,0 +1,47 @@
+<!doctype html>
+<html lang="ru">
+<head>
+<meta charset="utf-8">
+<style>
+  :root { --bg:#fff; --fg:#111; --muted:#666; --line:#ddd; --field:#f3f3f3; --accent:#e60023; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#1d1d1d; --fg:#eee; --muted:#aaa; --line:#3a3a3a; --field:#2a2a2a; }
+  }
+  body { margin:0; width:330px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
+  main { padding:14px; }
+  h1 { font-size:15px; margin:0 0 10px; }
+  button { font:inherit; border:0; border-radius:20px; padding:9px 14px; cursor:pointer; }
+  button:disabled { opacity:.45; cursor:default; }
+  #go { width:100%; background:var(--accent); color:#fff; font-weight:600; }
+  .or { color:var(--muted); margin:12px 0 6px; }
+  form { display:flex; gap:6px; }
+  input { flex:1; min-width:0; font:inherit; color:var(--fg); background:var(--field); border:1px solid var(--line);
+          border-radius:20px; padding:8px 12px; outline:none; }
+  input:focus { border-color:var(--accent); }
+  #paste { background:var(--accent); color:#fff; font-weight:600; }
+  .link { background:none; color:var(--muted); padding:4px 0; text-decoration:underline; }
+  .hint { color:var(--muted); margin:8px 0 0; }
+  .err { color:var(--accent); margin:8px 0 0; }
+  .hint:empty, .err:empty { display:none; }
+  footer { margin-top:10px; }
+</style>
+</head>
+<body>
+<main>
+  <h1>Pinterest Board Downloader</h1>
+  <button id="go" hidden></button>
+  <p id="hint" class="hint"></p>
+  <p class="or">Ссылка на пин или доску:</p>
+  <form id="form">
+    <input id="url" type="text" placeholder="https://pinterest.com/pin/…" autocomplete="off" spellcheck="false">
+    <button id="paste" type="submit">Скачать</button>
+  </form>
+  <p id="collecting" class="hint"></p>
+  <p id="error" class="err"></p>
+  <footer>
+    <button id="open" class="link">Открыть вкладку загрузок</button>
+  </footer>
+</main>
+<script src="popup.js"></script>
+</body>
+</html>
