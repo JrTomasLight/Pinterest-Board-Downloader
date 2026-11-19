@@ -19,17 +19,19 @@ const $ = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------ версия и ссылки
 const REPO = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
+const BOOSTY = "https://boosty.to/jrtomaslight";
 const VERSION = chrome.runtime.getManifest ? chrome.runtime.getManifest().version : "";
 if ($("ver")) {
   $("ver").textContent = VERSION ? "v" + VERSION : "";
   $("verFoot").textContent = VERSION ? `Версия ${VERSION}` : "";
-  $("repo").href = $("repoFoot").href = REPO;
+  $("repo").href = REPO;
+  $("boosty").href = BOOSTY;
   $("issues").href = REPO + "/issues";
 }
 
-// «Пока ничего не скачивается» — если нет ни загрузок, ни очереди
+// заголовок «Загрузки» над очередью и досками — только когда там что-то есть
 function updateEmpty() {
-  $("empty").hidden = $("boards").children.length > 0 || !$("queue").hidden;
+  $("loadsTitle").hidden = $("boards").children.length === 0 && $("queue").hidden;
 }
 
 // ------------------------------------------------------------ папка (хранится в IndexedDB)
@@ -69,6 +71,7 @@ async function pickFolder() {
     root = h;
     $("folderName").textContent = h.name;
     showNeed("");
+    if (typeof libraryReset === "function") libraryReset();
     run();
   } catch (e) {
     if (e.name !== "AbortError") alert("Не удалось выбрать папку: " + e.message);
@@ -89,6 +92,7 @@ async function ensureRoot() {
       if (await hasPermission(saved, true)) {
         root = saved;
         showNeed("");
+        if (typeof libraryReset === "function") libraryReset();
         run();
       }
     };
@@ -257,7 +261,22 @@ async function syncFolder(folder, dir, stats, step = () => {}) {
 
   // Каждый перенос и переименование виден в прогрессе — на большой доске их могут быть тысячи.
   // Делаем их по несколько сразу: файлы разных пинов друг другу не мешают.
-  const away = [...renames.flatMap((r) => r.extra), ...[...have.values()].flat()]; // дубликаты и убранные с доски
+  // Лишние файлы того же пина (например, после двух сверок наперегонки): точная копия оставленного
+  // файла удаляется, а отличающийся файл убирается вместе с пинами, которых больше нет на доске.
+  const away = [...have.values()].flat();
+  const sizeOf = async (name) => (await (await dir.getFileHandle(name)).getFile()).size;
+  await pool(renames.filter((r) => r.extra.length), FILE_OPS_PARALLEL, async (r) => {
+    const keepSize = await sizeOf(r.keep);
+    for (const extra of r.extra) {
+      if ((await sizeOf(extra)) === keepSize) {
+        await dir.removeEntry(extra);
+        stats.dupes++;
+      } else {
+        away.push(extra);
+      }
+    }
+    step(`Убираю повторяющиеся файлы пинов: удалено ${stats.dupes}`);
+  });
   if (away.length) removedDir = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
   let n = 0;
   await pool(away, FILE_OPS_PARALLEL, async (name) => {
@@ -573,7 +592,7 @@ async function downloadBoard(board, view) {
   const signal = activeSignal || new AbortController().signal;
   view.status("Сверяю с уже скачанным…");
   dirCache.clear(); // папки разделов могли переименоваться
-  const stats = { total: 0, done: 0, renamed: 0, removed: 0 };
+  const stats = { total: 0, done: 0, renamed: 0, removed: 0, dupes: 0 };
   const jobs = [];
   // сверка большой доски может идти долго — показываем каждый шаг, а не одну надпись
   let lastStep = 0;
@@ -586,6 +605,7 @@ async function downloadBoard(board, view) {
   };
   await renumberSections(board.folders[0], step);
   for (const folder of board.folders) {
+    if (folder.skip) continue; // скачивается один раздел — корень доски не трогаем
     checkCancel();
     if (board.folders.length > 1) view.status(`Сверяю с уже скачанным: «${folder.title}»…`);
     jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats, step)));
@@ -596,6 +616,7 @@ async function downloadBoard(board, view) {
   if (stats.done) notes.push(`уже было: ${stats.done}`);
   if (stats.renamed) notes.push(`перенумеровано: ${stats.renamed}`);
   if (stats.removed) notes.push(`убрано в «${REMOVED_DIR}»: ${stats.removed}`);
+  if (stats.dupes) notes.push(`удалено одинаковых копий: ${stats.dupes}`);
   if (jobs.length) notes.push(`новых: ${jobs.length}`);
   view.note(notes.join(", "));
   view.update(done, total, failed);
@@ -620,7 +641,7 @@ async function downloadBoard(board, view) {
   view.status("Пишу галерею…");
 
   for (const folder of board.folders) {
-    if (folder.single) continue; // для отдельных пинов галерея не нужна
+    if (folder.single || folder.skip) continue; // для отдельных пинов галерея не нужна
     const dir = await getDir(folder.path);
     // служебные файлы прошлых версий лежали рядом с картинками — убираем
     for (const old of ["index.html", "pins.json"]) {
@@ -631,7 +652,31 @@ async function downloadBoard(board, view) {
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
   }
+  await saveBoardInfo(board, { done, total, failed });
   return { done, total, failed, fresh: jobs.length };
+}
+
+// _галерея/board.json: ссылка на доску — по ней доску можно обновить из списка «Мои доски».
+// Если скачивался один раздел, а доска уже записана целиком, запись не трогаем.
+async function saveBoardInfo(board, r) {
+  if (!board.url || (board.folders[0] && board.folders[0].single)) return;
+  try {
+    const gallery = await (await getDir(board.root)).getDirectoryHandle(GALLERY_DIR, { create: true });
+    if (board.section && (await readJson(gallery, BOARD_INFO))) return;
+    await writeText(gallery, BOARD_INFO, JSON.stringify({
+      url: board.url, id: board.id, title: board.title, user: board.user, section: board.section || null,
+      files: r.total, failed: r.failed, updatedAt: Date.now(),
+    }, null, 1));
+  } catch { /* без записи доска просто не попадёт в список */ }
+}
+
+const BOARD_INFO = "board.json";
+async function readJson(dir, name) {
+  try {
+    return JSON.parse(await (await (await dir.getFileHandle(name)).getFile()).text());
+  } catch {
+    return null;
+  }
 }
 
 // ------------------------------------------------------------ состояние для кнопки на странице доски
@@ -679,10 +724,12 @@ function reportingView(view, job) {
 
 // ------------------------------------------------------------ уведомления
 // Если вкладка загрузок в фоне, о конце каждой доски или пина сообщаем системным уведомлением.
-function notify(data, title, message) {
+const NOTE_ID = "pinboard-done";
+function notify(title, message) {
   if (!document.hidden || !chrome.notifications) return;
   try { // уведомление — не главное: если не вышло, загрузка всё равно считается удачной
-    chrome.notifications.create("done-" + Date.now(), {
+    chrome.notifications.clear(NOTE_ID); // новое заменяет прежнее, а не копится стопкой
+    chrome.notifications.create(NOTE_ID, {
       type: "basic",
       iconUrl: chrome.runtime.getURL("icons/128.png"),
       title,
@@ -692,18 +739,41 @@ function notify(data, title, message) {
   } catch { /* без уведомления */ }
 }
 
+// Итоги досок копятся, пока идёт серия (очередь и сбор пинов по ссылкам или «Обновить все»),
+// а уведомление одно — когда всё закончилось.
+const finished = []; // { data, r } или { data, error }
+function flushNotify() {
+  if (!finished.length || running) return;
+  const items = finished.splice(0);
+  if (items.length === 1) {
+    const [x] = items;
+    if (x.error) notify(`Не удалось скачать «${x.data.title}»`, x.error);
+    else notifyResult(x.data, x.r);
+    return;
+  }
+  const ok = items.filter((x) => x.r);
+  const bad = items.filter((x) => x.error || x.r.failed).length;
+  const fresh = ok.reduce((n, x) => n + x.r.fresh, 0);
+  const nothing = ok.filter((x) => !x.r.fresh && !x.r.failed).length;
+  const parts = [`Новых файлов: ${fresh}.`];
+  if (nothing) parts.push(`Без новых пинов: ${nothing}.`);
+  if (bad) parts.push(`С ошибками: ${bad} — подробности во вкладке загрузок.`);
+  notify(bad ? `Загрузка закончена, с ошибками: ${bad} из ${items.length}` : `Готово, скачано загрузок: ${items.length}`,
+    parts.join(" "));
+}
+
 function notifyResult(data, r) {
   const single = data.folders[0] && data.folders[0].single;
   const name = single ? data.title : `Доска «${data.title}»`;
-  if (r.failed) notify(data, `${name} скачана с ошибками`, `Скачано ${r.done} из ${r.total}, не скачалось: ${r.failed}. Подробности — во вкладке загрузок.`);
-  else if (!r.fresh && r.total) notify(data, `${name}: новых пинов нет`, `Всё уже было в папке (файлов: ${r.total}).`);
-  else notify(data, single ? `${name} — скачано` : `${name} успешно скачана`, `Новых файлов: ${r.fresh}, всего в папке: ${r.done}.`);
+  if (r.failed) notify(`${name} скачана с ошибками`, `Скачано ${r.done} из ${r.total}, не скачалось: ${r.failed}. Подробности — во вкладке загрузок.`);
+  else if (!r.fresh && r.total) notify(`${name}: новых пинов нет`, `Всё уже было в папке (файлов: ${r.total}).`);
+  else notify(single ? `${name} — скачано` : `${name} успешно скачана`, `Новых файлов: ${r.fresh}, всего в папке: ${r.done}.`);
 }
 
 if (chrome.notifications) {
   // нажатие на уведомление — к вкладке загрузок
   chrome.notifications.onClicked.addListener(async (id) => {
-    if (!id.startsWith("done-")) return;
+    if (id !== NOTE_ID) return;
     chrome.notifications.clear(id);
     const t = await chrome.tabs.getCurrent();
     if (t) {
@@ -717,6 +787,91 @@ if (chrome.notifications) {
 const seen = new Set();
 let running = false;
 let currentKey = null;
+let currentCtrl = null;
+// доски, отменённые кнопкой «Остановить», пока у них ещё собирались пины: когда они дойдут
+// до очереди, сразу убираем. Если доску потом запустят заново, отмена с неё снимается.
+const cancelledJobs = new Map(); // ключ -> время отмены
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area !== "local") return;
+  for (const [k, v] of Object.entries(ch)) {
+    const s = v.newValue;
+    if (k.startsWith("job:") && s && s.phase === "collect" && s.at > (cancelledJobs.get(k.slice(4)) || Infinity)) {
+      cancelledJobs.delete(k.slice(4));
+    }
+  }
+});
+
+// «Остановить»: убрать всё из очереди, отменить текущую загрузку и доски, у которых ещё ищутся пины.
+async function stopAll() {
+  const now = Date.now();
+  const all = await chrome.storage.local.get(null);
+  for (const [k, v] of Object.entries(all)) {
+    if (k.startsWith("job:") && v && v.phase === "collect") {
+      cancelledJobs.set(k.slice(4), now);
+      await setJob(k.slice(4), { phase: "cancelled" });
+    }
+  }
+  for (const p of all.pending || []) {
+    if (p.key === currentKey && p.data) continue; // её отменяет currentCtrl
+    seen.add(p.key);
+    await setJob(p.job, { phase: "removed" });
+    await chrome.runtime.sendMessage({ type: "taken", key: p.key, dropped: true });
+  }
+  if (currentCtrl) currentCtrl.abort();
+  renderQueue();
+}
+
+// ------------------------------------------------------------ сбор пинов для досок из очереди
+// Доска, добавленная ссылкой, стоит в очереди без пинов. Пины собираются, когда до неё доходит
+// черёд, а у следующей — заранее, пока качается текущая.
+const collecting = new Set(); // ключи строк очереди, у которых уже идёт сбор
+
+function startCollecting(p) {
+  if (collecting.has(p.key)) return;
+  collecting.add(p.key);
+  chrome.runtime.sendMessage({ type: "download", url: p.link, job: p.job }).catch(() => {});
+}
+
+// Ждёт, пока у строки очереди появятся пины. Итог: "ok", "removed" (убрали из очереди) или текст ошибки.
+// Сбор сообщает о ходе хотя бы раз в пару минут; если вкладка Pinterest замолчала дольше —
+// считаем это ошибкой, чтобы из-за одной доски не встала вся очередь.
+const COLLECT_SILENCE_MS = 4 * 60 * 1000;
+function waitFilled(key, job) {
+  const started = Date.now();
+  return new Promise((resolve) => {
+    const finish = (v) => {
+      chrome.storage.onChanged.removeListener(onChange);
+      clearInterval(watchdog);
+      collecting.delete(key);
+      resolve(v);
+    };
+    const watchdog = setInterval(async () => {
+      const s = (await chrome.storage.local.get("job:" + job))["job:" + job];
+      if (Date.now() - Math.max(started, (s && s.at) || 0) > COLLECT_SILENCE_MS) {
+        finish("Pinterest долго не отвечает. Обновите вкладку Pinterest (F5) и добавьте ссылку ещё раз.");
+      }
+    }, 20000);
+    const check = async () => {
+      const got = await chrome.storage.local.get(["pending", "job:" + job]);
+      const p = (got.pending || []).find((x) => x.key === key);
+      if (!p) return finish("removed");
+      if (p.data) return finish("ok");
+      const s = got["job:" + job];
+      if (s && s.phase === "error") finish(s.text || "Ошибка");
+    };
+    const onChange = (ch, area) => {
+      if (area === "local" && (ch.pending || ch["job:" + job])) check();
+    };
+    chrome.storage.onChanged.addListener(onChange);
+    check();
+  });
+}
+
+function prefetchNext(pending, afterKey) {
+  const i = pending.findIndex((p) => p.key === afterKey);
+  const next = pending.slice(i + 1).find((p) => !p.data && p.link && !seen.has(p.key));
+  if (next) startCollecting(next);
+}
 
 // Доски и пины, которые ждут своей очереди: пронумерованы в порядке скачивания,
 // порядок меняется перетаскиванием мышью, ненужное можно убрать.
@@ -734,13 +889,33 @@ async function saveOrder() {
   await chrome.runtime.sendMessage({ type: "reorder", keys });
 }
 
+// у досок без пинов в строке очереди виден ход сбора: «Ищу пины… найдено 120»
+function paintQueueRow(row, s) {
+  const st = row.querySelector(".qst");
+  if (!st) return;
+  st.textContent = s && s.phase === "collect" ? (s.text || "Ищу пины…").replace(/^.*?: /, "") : "";
+  st.title = st.textContent;
+}
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area !== "local") return;
+  for (const [k, v] of Object.entries(ch)) {
+    if (!k.startsWith("job:")) continue;
+    const row = $("queue").querySelector(`.qrow[data-job="${CSS.escape(k.slice(4))}"]`);
+    if (row) paintQueueRow(row, v.newValue);
+  }
+});
+
 async function renderQueue() {
   if (dragging) {
     renderLater = true;
     return;
   }
   const { pending = [] } = await chrome.storage.local.get("pending");
-  const waiting = pending.filter((p) => p.key !== currentKey && !seen.has(p.key));
+  const jobKeys = pending.filter((p) => !p.data && p.job).map((p) => "job:" + p.job);
+  const got = jobKeys.length ? await chrome.storage.local.get(jobKeys) : {};
+  const jobStates = Object.fromEntries(Object.entries(got).map(([k, v]) => [k.slice(4), v]));
+  // доска, у которой сейчас собираются пины, ещё видна в очереди — её тоже можно убрать
+  const waiting = pending.filter((p) => !seen.has(p.key) || (p.key === currentKey && !p.data));
   const box = $("queue");
   box.innerHTML = "";
   box.hidden = !waiting.length;
@@ -752,6 +927,16 @@ async function renderQueue() {
     const tip = document.createElement("small");
     tip.textContent = "Порядок можно менять, перетаскивая мышью";
     h.append(tip);
+    const all = document.createElement("button");
+    all.type = "button";
+    all.className = "qall";
+    all.textContent = "Убрать всё";
+    all.title = "Убрать всё из очереди и остановить текущую загрузку";
+    all.addEventListener("click", () => {
+      all.disabled = true;
+      stopAll();
+    });
+    h.append(all);
   }
   box.append(h);
   waiting.forEach((p, i) => {
@@ -762,9 +947,12 @@ async function renderQueue() {
     row.innerHTML = `<svg class="grip" viewBox="0 0 10 16" aria-hidden="true"><g fill="currentColor">` +
       `<circle cx="2.5" cy="3" r="1.4"/><circle cx="7.5" cy="3" r="1.4"/><circle cx="2.5" cy="8" r="1.4"/>` +
       `<circle cx="7.5" cy="8" r="1.4"/><circle cx="2.5" cy="13" r="1.4"/><circle cx="7.5" cy="13" r="1.4"/></g></svg>` +
-      `<span class="qnum"></span><span class="qname"></span>`;
+      `<span class="qnum"></span><span class="qname"></span><span class="qst"></span>`;
     row.querySelector(".qnum").textContent = i + 1;
-    row.querySelector(".qname").textContent = p.data.title;
+    row.querySelector(".qname").textContent = p.data ? p.data.title : p.title;
+    if (p.job) row.dataset.job = p.job;
+    if (p.key === currentKey) row.draggable = false; // уже идёт
+    paintQueueRow(row, jobStates[p.job]);
     const rm = document.createElement("button");
     rm.type = "button";
     rm.textContent = "Убрать";
@@ -773,7 +961,7 @@ async function renderQueue() {
       rm.disabled = true;
       seen.add(p.key);
       await setJob(p.job, { phase: "removed" });
-      await chrome.runtime.sendMessage({ type: "taken", key: p.key });
+      await chrome.runtime.sendMessage({ type: "taken", key: p.key, dropped: true });
       renderQueue();
     });
     row.append(rm);
@@ -817,42 +1005,164 @@ async function run() {
     return;
   }
   try {
-    while (true) {
-      const { pending = [] } = await chrome.storage.local.get("pending");
-      const item = pending.find((p) => !seen.has(p.key));
-      if (!item) break;
-      seen.add(item.key);
-      currentKey = item.key;
-      renderQueue();
-
-      const ctrl = new AbortController();
-      activeSignal = ctrl.signal;
-      const view = reportingView(boardView(item.data, () => ctrl.abort()), item.job);
-      try {
-        const r = await downloadBoard(item.data, view);
-        view.finish(r.fresh || r.failed || !r.total ? `Готово ${r.done} из ${r.total}`
-          : `Новых пинов нет — все файлы (${r.total}) уже были в папке`, "done");
-        if (view.final) view.final({ phase: "done", ...r });
-        notifyResult(item.data, r);
-      } catch (e) {
-        if (ctrl.signal.aborted) {
-          view.finish("Отменено. Уже скачанное осталось в папке, повторный запуск докачает остальное.", "cancelled");
-          if (view.final) view.final({ phase: "cancelled" });
-        } else {
-          view.finish("Не удалось сохранить", "failed");
-          view.error(e.message || String(e));
-          if (view.final) view.final({ phase: "failed", text: e.message || String(e) });
-          notify(item.data, `Не удалось скачать «${item.data.title}»`, e.message || String(e));
-        }
-      } finally {
-        activeSignal = null;
-        currentKey = null;
-      }
-      await chrome.runtime.sendMessage({ type: "taken", key: item.key });
-    }
+    // пока ждать нечего, очередь не занимаем — иначе другие вкладки зря решат, что она занята
+    if (await hasWork()) await withQueueLock(processQueue);
   } finally {
     running = false;
     renderQueue();
+    flushNotify();
+  }
+}
+
+async function hasWork() {
+  const { pending = [] } = await chrome.storage.local.get("pending");
+  return pending.some((p) => !seen.has(p.key));
+}
+
+// Если открыто несколько вкладок загрузок, очередь качает только одна — иначе они скачивали бы
+// одни и те же доски наперегонки. Та, что качает, каждые несколько секунд отмечается в хранилище.
+// Остальные ждут, только пока эта отметка свежая: зависшая или скрытая браузером страница
+// может держать очередь, не качая, — тогда её забираем.
+const QUEUE_LOCK = "pinboard-queue";
+const PAGE_ID = Math.random().toString(36).slice(2);
+const OWNER_FRESH_MS = 12000;
+let ownQueue = false;
+let queueLost = false; // другая вкладка забрала очередь («Качать здесь») — эта перестаёт качать
+
+// очередь забрали: текущую загрузку прерываем, а саму доску оставляем в очереди — её докачает та вкладка
+function lostQueue() {
+  queueLost = true;
+  if (currentCtrl) currentCtrl.abort();
+}
+
+async function ownerAlive() {
+  try {
+    const { queueOwner: o } = await chrome.storage.local.get("queueOwner");
+    return !!(o && o.id !== PAGE_ID && Date.now() - o.at < OWNER_FRESH_MS);
+  } catch {
+    return false;
+  }
+}
+
+async function withQueueLock(fn) {
+  if (!navigator.locks) return fn();
+  if (ownQueue) return; // эта страница уже качает очередь
+  let done = false;
+  const body = async (lock) => {
+    if (!lock || done) return;
+    done = true;
+    ownQueue = true;
+    queueLost = false;
+    $("other").hidden = true;
+    const beat = () => chrome.storage.local.set({ queueOwner: { id: PAGE_ID, at: Date.now() } }).catch(() => {});
+    await beat();
+    const timer = setInterval(beat, 4000);
+    try {
+      await fn();
+    } finally {
+      clearInterval(timer);
+      ownQueue = false;
+      chrome.storage.local.remove("queueOwner").catch(() => {});
+    }
+  };
+  const request = (opts) => navigator.locks.request(QUEUE_LOCK, opts, body)
+    .catch((e) => { if (e && e.name === "AbortError") lostQueue(); });
+  await request({ ifAvailable: true });
+  if (done) return;
+  await new Promise((resolve) => {
+    let timer = null;
+    const take = () => {
+      if (done) return;
+      clearInterval(timer);
+      request({ steal: true }).then(resolve);
+    };
+    // «Качать здесь» — забрать очередь, даже если та вкладка ещё качает
+    $("otherTake").onclick = take;
+    $("otherGo").onclick = () => chrome.runtime.sendMessage({ type: "open", other: true });
+    const check = async () => {
+      if (done) return;
+      if (await ownerAlive()) {
+        $("other").hidden = false;
+      } else {
+        take();
+      }
+    };
+    // та вкладка закроется — замок освободится сам
+    request({}).then(() => {
+      if (done && !ownQueue) { clearInterval(timer); resolve(); }
+    });
+    setTimeout(check, 1500); // даём той вкладке отметиться, если она только начала
+    timer = setInterval(check, 5000);
+  });
+}
+
+async function processQueue() {
+  while (!queueLost) {
+    const { pending = [] } = await chrome.storage.local.get("pending");
+    let item = pending.find((p) => !seen.has(p.key));
+    if (!item) break;
+    seen.add(item.key);
+    if (!item.data) { // пины ещё не собраны — собираем сейчас
+      currentKey = item.key;
+      renderQueue();
+      startCollecting(item);
+      const res = await waitFilled(item.key, item.job);
+      currentKey = null;
+      if (queueLost) { seen.delete(item.key); break; }
+      if (res === "removed") continue;
+      if (res !== "ok") {
+        const isPin = !!(item.job && /^(link|pin):/.test(item.job));
+        const view = boardView({ title: item.title, folders: [{ single: isPin }] }, () => {});
+        view.finish("Не удалось собрать пины", "failed");
+        view.error(`${item.link} — ${res}`);
+        finished.push({ data: { title: item.title }, error: res });
+        await chrome.runtime.sendMessage({ type: "taken", key: item.key });
+        continue;
+      }
+      const now = (await chrome.storage.local.get("pending")).pending || [];
+      item = now.find((p) => p.key === item.key);
+      if (!item) continue;
+    }
+    if (item.job && cancelledJobs.has(item.job)) { // остановили, пока собирались пины
+      cancelledJobs.delete(item.job);
+      await setJob(item.job, { phase: "cancelled" });
+      await chrome.runtime.sendMessage({ type: "taken", key: item.key });
+      continue;
+    }
+    currentKey = item.key;
+    renderQueue();
+    prefetchNext(pending, item.key);
+
+    const ctrl = new AbortController();
+    currentCtrl = ctrl;
+    activeSignal = ctrl.signal;
+    const view = reportingView(boardView(item.data, () => ctrl.abort()), item.job);
+    try {
+      const r = await downloadBoard(item.data, view);
+      view.finish(r.fresh || r.failed || !r.total ? `Готово ${r.done} из ${r.total}`
+        : `Новых пинов нет — все файлы (${r.total}) уже были в папке`, "done");
+      if (view.final) view.final({ phase: "done", ...r });
+      finished.push({ data: item.data, r });
+      if (typeof libraryChanged === "function") libraryChanged();
+    } catch (e) {
+      if (queueLost) {
+        view.finish("Загрузка продолжится в другой вкладке загрузок.", "cancelled");
+      } else if (ctrl.signal.aborted) {
+        view.finish("Отменено. Уже скачанное осталось в папке, повторный запуск докачает остальное.", "cancelled");
+        if (view.final) view.final({ phase: "cancelled" });
+      } else {
+        view.finish("Не удалось сохранить", "failed");
+        view.error(e.message || String(e));
+        if (view.final) view.final({ phase: "failed", text: e.message || String(e) });
+        finished.push({ data: item.data, error: e.message || String(e) });
+      }
+    } finally {
+      activeSignal = null;
+      currentKey = null;
+      currentCtrl = null;
+    }
+    if (queueLost) { seen.delete(item.key); break; } // доска остаётся в очереди для той вкладки
+    await chrome.runtime.sendMessage({ type: "taken", key: item.key });
   }
 }
 

@@ -1,11 +1,12 @@
 // Работает внутри открытой вкладки Pinterest: собирает пины доски по порядку,
 // используя тот же API, что и сам сайт, и ваш текущий вход в аккаунт.
 (() => {
-  if (window.__pinboardDl) return;
-  window.__pinboardDl = true;
+  try {
+    if (window.__pinboardDl && window.__pinboardDl()) return; // уже работает
+  } catch { /* скрипт от прежней версии расширения — ставим новый */ }
+  window.__pinboardDl = () => !!(chrome.runtime && chrome.runtime.id);
 
-  const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
-    "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
+  const { safeName, isBoardPath, pathParts } = PBD;
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const REQUEST_TIMEOUT = 30000;
@@ -44,7 +45,8 @@
       "X-Requested-With": "XMLHttpRequest",
       "X-CSRFToken": csrf(),
       "X-Pinterest-Source-Url": sourceUrl,
-      "X-Pinterest-PWS-Handler": sourceUrl.startsWith("/pin/") ? "www/pin/[id].js" : "www/[username]/[slug].js",
+      "X-Pinterest-PWS-Handler": sourceUrl.startsWith("/pin/") ? "www/pin/[id].js"
+        : /^\/[^/]+\/$/.test(sourceUrl) ? "www/[username].js" : "www/[username]/[slug].js",
     };
     const v = await appVersion();
     if (v) headers["X-APP-VERSION"] = v;
@@ -150,17 +152,9 @@
   const isPin = (x) => x && x.type === "pin" && x.id;
 
   // ---------------------------------------------------------------- доска
-  function safeName(s, limit = 80) {
-    s = String(s || "").replace(/[<>:"/\\|?*\x00-\x1f~]/g, "_").replace(/\s+/g, " ").trim();
-    s = s.replace(/^[.\s]+|[.\s]+$/g, "");
-    return (s || "untitled").slice(0, limit);
-  }
-
   function parseBoard(href) {
-    const u = new URL(href);
-    const parts = u.pathname.split("/").filter(Boolean).map(decodeURIComponent);
-    if (parts.length < 2 || RESERVED.has(parts[0]) || RESERVED.has(parts[1])) return null;
-    return { user: parts[0], slug: parts[1], section: parts[2] || null };
+    const parts = pathParts(href);
+    return isBoardPath(parts) ? { user: parts[0], slug: parts[1], section: parts[2] || null } : null;
   }
 
   async function collectPins(iter, src, label, progress) {
@@ -233,6 +227,11 @@
     if (board.section_count) {
       for await (const s of paginate("BoardSectionsResource", { board_id: board.id }, src)) sections.push(s);
     }
+    // номер папки раздела — его место на доске, даже если скачивается один раздел
+    const width = String(sections.length).length;
+    sections.forEach((s, i) => {
+      s._dir = `${String(i + 1).padStart(width, "0")} ${safeName(s.title || s.slug || s.id)}`;
+    });
     if (b.section) {
       sections = sections.filter((s) => s.slug === b.section);
       if (!sections.length) throw new Error(`Раздел «${b.section}» не найден.`);
@@ -240,11 +239,10 @@
 
     const folders = [];
     let found = 0;
-    const width = String(sections.length).length;
     const subfolders = [];
     for (let i = 0; i < sections.length; i++) {
       const s = sections[i];
-      const dir = `${String(i + 1).padStart(width, "0")} ${safeName(s.title || s.slug || s.id)}`;
+      const dir = s._dir;
       const label = `Раздел «${s.title}»`;
       progress(`${label}…`);
       const pins = await collectPins(
@@ -265,11 +263,36 @@
     }
     const root = toFolder(rootPath, board.name || b.slug, rootPins);
     root.subfolders = subfolders;
+    // скачивается один раздел — пины в корне доски не трогаем (иначе их сочтёт убранными с доски)
+    if (b.section) root.skip = true;
     folders.unshift(root);
 
     const expected = b.section ? null : board.pin_count;
     const gated = expected && found < expected * 0.8 && found <= 30;
-    return { id: board.id, title: board.name || b.slug, root: rootPath, folders, found, expected, gated };
+    const url = `https://www.pinterest.com${src}` + (b.section ? `${encodeURIComponent(b.section)}/` : "");
+    return {
+      id: board.id, title: board.name || b.slug, root: rootPath, folders, found, expected, gated,
+      url, user: b.user, section: b.section || null,
+    };
+  }
+
+  // ---------------------------------------------------------------- доски профиля
+  async function listBoards(user) {
+    const src = `/${encodeURIComponent(user)}/`;
+    const out = [];
+    for await (const b of paginate("BoardsResource", {
+      username: user, page_size: 25, privacy_filter: "all", sort: "last_pinned_to", field_set_key: "profile_grid_item",
+    }, src)) {
+      if (!b || !b.url || !b.name || (b.type && b.type !== "board")) continue;
+      out.push({
+        id: String(b.id),
+        name: b.name,
+        url: new URL(b.url, "https://www.pinterest.com").href,
+        pins: b.pin_count || 0,
+        secret: b.privacy === "secret" || b.privacy === "protected",
+      });
+    }
+    return out;
   }
 
   // ---------------------------------------------------------------- отдельные пины
@@ -320,6 +343,10 @@
 
   if (typeof chrome !== "undefined" && chrome.runtime && chrome.runtime.onMessage) {
     chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
+      if (msg.cmd === "boards") {
+        listBoards(msg.user).then((boards) => reply({ boards }), (e) => reply({ error: String(e.message || e) }));
+        return true;
+      }
       if (msg.cmd !== "collect") return;
       reply({ ok: true });
       const job = msg.job; // по нему кнопка «Скачать доску» узнаёт, что происходит с её доской

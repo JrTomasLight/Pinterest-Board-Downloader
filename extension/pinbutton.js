@@ -123,15 +123,17 @@
         hide();
       }, 1800);
     };
+    // своя метка задачи: по ней видно, что стало именно с этим пином
+    const job = `pin:${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
     const watch = (ch, area) => {
-      const st = area === "local" && ch.status && ch.status.newValue;
+      const st = area === "local" && ch["job:" + job] && ch["job:" + job].newValue;
       if (!st) return;
-      if (st.error) finish("Ошибка", "#8a1c1c", st.error);
-      else if (st.done) finish("✓ В очереди", "#1a7f37");
+      if (st.phase === "error") finish("Ошибка", "#8a1c1c", st.text);
+      else if (st.phase !== "collect") finish("✓ В очереди", "#1a7f37");
     };
     chrome.storage.onChanged.addListener(watch);
     timer = setTimeout(() => finish("Скачать"), 30000);
-    chrome.runtime.sendMessage({ type: "download", url });
+    chrome.runtime.sendMessage({ type: "download", url, job });
   });
 
   // не даём клику по кнопке открыть пин под ней
@@ -142,13 +144,7 @@
   // ---------------------------------------------------------------- «Скачать доску» в шапке доски
   // Встаёт перед кнопкой «Поделиться» и берёт у неё цвет, высоту и скругление,
   // поэтому выглядит как родная и на своей доске, и на чужой.
-  const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
-    "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
-
-  function onBoardPage() {
-    const p = location.pathname.split("/").filter(Boolean);
-    return p.length >= 2 && !RESERVED.has(p[0]) && !RESERVED.has(p[1]);
-  }
+  const onBoardPage = () => PBD.isBoardPath(PBD.pathParts(location.href));
 
   const visible = (el) => el && el.getClientRects().length > 0;
 
@@ -246,20 +242,12 @@
   // Вкладка загрузок и фоновый скрипт пишут этап в storage (job:<адрес доски>), кнопка его показывает:
   // поиск пинов → очередь → сверка → «12 / 340» с заполнением → итог. Итог виден SHOW_RESULT мс.
   const SHOW_RESULT = 12000;
-  const ACTIVE = new Set(["collect", "queued", "folder", "sync", "download"]);
+  const { ACTIVE, boardKey } = PBD;
   const IDLE_TITLE = "Скачать всю доску через Pinterest Board Downloader";
   const look = { bg: "#e9e9e9", color: "#111" };
   let jobKey = null;   // доска, на странице которой мы сейчас
   let job = null;      // её последнее состояние
   let resultTimer = null;
-
-  const boardKey = (href) => {
-    try {
-      return new URL(href).pathname.split("/").filter(Boolean).map((p) => decodeURIComponent(p).toLowerCase()).join("/");
-    } catch {
-      return null;
-    }
-  };
 
   // текст, подсказка, заполнение (0…1 или null) и цвет итога
   function view(s) {
@@ -274,7 +262,8 @@
         return { text: m ? `Найдено пинов: ${m[1]}` : "Ищу пины…", title };
       }
       case "queued":
-        return { text: "В очереди", title: `Найдено пинов: ${s.found}. Доска ждёт своей очереди во вкладке загрузок.` +
+        return { text: "В очереди", title: (s.found != null ? `Найдено пинов: ${s.found}. ` : "") +
+          "Доска ждёт своей очереди во вкладке загрузок." +
           (s.gated ? " Найдены не все пины — похоже, вы не вошли в аккаунт." : "") + more };
       case "folder":
         return { text: "Выберите папку", title: "Откройте вкладку загрузок и выберите папку для сохранения." + more, fill: null };

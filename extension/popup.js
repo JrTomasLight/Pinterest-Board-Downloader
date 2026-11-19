@@ -1,19 +1,17 @@
 const $ = (id) => document.getElementById(id);
-const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
-  "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
 
 let tab = null;
 
 // что открыто во вкладке: "pin", "board" или null
 function pageKind(url) {
   try {
-    const u = new URL(url);
-    if (!/(^|\.)pinterest\.[a-z.]+$/.test(u.hostname)) return null;
-    const p = u.pathname.split("/").filter(Boolean);
-    if (p[0] === "pin" && p[1]) return "pin";
-    if (p.length >= 2 && !RESERVED.has(p[0]) && !RESERVED.has(p[1])) return "board";
-  } catch { /* не ссылка */ }
-  return null;
+    if (!PBD.isPinterestHost(new URL(url).hostname)) return null;
+  } catch {
+    return null; // не ссылка
+  }
+  const p = PBD.pathParts(url);
+  if (p[0] === "pin" && p[1]) return "pin";
+  return PBD.isBoardPath(p) ? "board" : null;
 }
 
 function render(status) {
