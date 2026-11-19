@@ -943,7 +943,7 @@ async function getExtensionDir() {
     if (!problem) return saved;
     if (problem.ahead) return { dir: saved, ahead: problem.ahead };
   }
-  updStep("Выберите папку, в которую распакован архив расширения (в ней лежит manifest.json). Это нужно один раз.");
+  updStep("Выберите папку, в которую распакован архив расширения: в ней лежат manifest.json и подпапка icons. При выборе папки файлы не видны — ориентируйтесь на подпапку icons. Это нужно один раз.");
   let dir;
   try {
     dir = await window.showDirectoryPicker({ id: "pinboard-ext", mode: "readwrite", startIn: "documents" });

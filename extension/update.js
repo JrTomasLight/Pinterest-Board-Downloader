@@ -134,7 +134,7 @@ async function removeFileAt(dir, path) {
 // Папка, выбранная пользователем, — точно папка этого расширения?
 async function checkExtensionDir(dir) {
   const raw = await readFileOrNull(dir, "manifest.json");
-  if (!raw) return "В этой папке нет файла manifest.json. Выберите папку, в которую распакован архив расширения.";
+  if (!raw) return "В этой папке нет файла manifest.json. Выберите папку, в которую распакован архив расширения, — ту, в которой видна подпапка icons.";
   let m;
   try {
     m = JSON.parse(new TextDecoder().decode(raw));
