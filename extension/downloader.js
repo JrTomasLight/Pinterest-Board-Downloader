@@ -533,6 +533,11 @@ function boardView(board, onCancel) {
   const details = document.createElement("details");
   details.hidden = true;
   details.innerHTML = "<summary>Что не скачалось</summary>";
+  const hint = document.createElement("p");
+  hint.className = "note";
+  hint.textContent = "Если не скачалось много файлов, мешать может VPN, прокси или другой способ обхода блокировок — " +
+    "попробуйте отключить его или добавить Pinterest в исключения и скачать доску ещё раз: уже скачанное пропустится.";
+  details.append(hint);
   el.append(details);
   $("boards").prepend(el);
   updateEmpty();
@@ -983,7 +988,10 @@ $("updGo").addEventListener("click", async () => {
     updStep("Готово. Перезапускаю расширение…");
     setTimeout(() => chrome.runtime.reload(), 400);
   } catch (e) {
-    updStep(e.message || String(e), true);
+    // чаще всего замену файлов блокирует антивирус — подсказываем, что делать
+    updStep(`${String(e.message || e).replace(/\.$/, "")}. Если папка выбрана верно, возможно, менять файлы расширения не даёт антивирус: ` +
+      "добавьте папку расширения (и при необходимости папку браузера) в исключения или отключите его на время обновления. " +
+      "Либо обновите расширение вручную — инструкция в README.", true);
   } finally {
     $("updGo").disabled = false;
   }
