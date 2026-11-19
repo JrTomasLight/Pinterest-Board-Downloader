@@ -64,4 +64,19 @@ $("open").addEventListener("click", () => chrome.runtime.sendMessage({ type: "op
 $("ver").textContent = "v" + chrome.runtime.getManifest().version;
 $("repo").href = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
 
+// плашка о новой версии — по нажатию открывается вкладка загрузок с кнопкой «Обновить»
+async function showUpdate() {
+  const { update: u } = await chrome.storage.local.get("update");
+  const on = u && u.version && compareVersions(u.version, chrome.runtime.getManifest().version) > 0;
+  $("upd").hidden = !on;
+  if (on) {
+    $("upd").textContent = `Доступна версия ${u.version} — обновить`;
+    const small = document.createElement("small");
+    small.textContent = "Откроется вкладка загрузок, обновление займёт несколько секунд";
+    $("upd").append(small);
+  }
+}
+$("upd").addEventListener("click", () => chrome.runtime.sendMessage({ type: "open" }));
+showUpdate();
+
 load();

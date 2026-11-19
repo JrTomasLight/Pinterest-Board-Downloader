@@ -735,3 +735,152 @@ $("pick").addEventListener("click", pickFolder);
   renderQueue();
   run();
 })();
+
+// ------------------------------------------------------------ обновление расширения
+const loadExtDir = () => idb("readonly", (s) => s.get("extDir"));
+const saveExtDir = (h) => idb("readwrite", (s) => s.put(h, "extDir"));
+let release = null;
+
+// Текст релиза (Markdown) — в простые абзацы, списки и жирный, без innerHTML
+function renderNotes(md, box) {
+  box.textContent = "";
+  let list = null;
+  const inline = (parent, text) => {
+    text.split(/(\*\*[^*]+\*\*)/).forEach((part) => {
+      if (!part) return;
+      if (/^\*\*[^*]+\*\*$/.test(part)) {
+        const b = document.createElement("b");
+        b.textContent = part.slice(2, -2);
+        parent.append(b);
+      } else parent.append(part.replace(/`/g, ""));
+    });
+  };
+  for (const raw of md.split(/\r?\n/)) {
+    const line = raw.trim();
+    if (!line) { list = null; continue; }
+    if (/^#{1,6}\s/.test(line)) {
+      list = null;
+      const h = document.createElement("h4");
+      inline(h, line.replace(/^#+\s*/, ""));
+      box.append(h);
+    } else if (/^[-*]\s/.test(line)) {
+      if (!list) { list = document.createElement("ul"); box.append(list); }
+      const li = document.createElement("li");
+      inline(li, line.replace(/^[-*]\s*/, ""));
+      list.append(li);
+    } else {
+      list = null;
+      const p = document.createElement("p");
+      inline(p, line);
+      box.append(p);
+    }
+  }
+}
+
+function updStep(text, isError) {
+  $("updStep").textContent = text || "";
+  $("updStep").className = "upd-step" + (isError ? " err" : "");
+}
+
+function showRelease(u) {
+  // сравниваем с установленной версией сейчас, а не на момент проверки
+  if (!u || !u.version || compareVersions(u.version, VERSION) <= 0) {
+    $("upd").hidden = true;
+    return;
+  }
+  release = u;
+  $("upd").hidden = false;
+  $("updTitle").textContent = `Доступна версия ${u.version}`;
+  $("updSub").textContent = `Сейчас установлена ${VERSION}. Обновление займёт несколько секунд.`;
+  $("updGo").hidden = false;
+  $("updClose").hidden = true;
+  $("updNotes").hidden = !u.notes;
+  if (u.notes) renderNotes(u.notes, $("updNotesText"));
+}
+
+function showChecked(u) {
+  if (!u || !u.checkedAt) return;
+  const when = new Date(u.checkedAt).toLocaleString("ru-RU", { day: "numeric", month: "long", hour: "2-digit", minute: "2-digit" });
+  const newer = u.version && compareVersions(u.version, VERSION) > 0;
+  $("updChecked").textContent = u.error ? `не удалось проверить (${when})` : newer ? "" : `последняя версия, проверено ${when}`;
+}
+
+// Папка, из которой расширение загружено в браузер: спрашиваем один раз и запоминаем.
+async function getExtensionDir() {
+  const saved = await loadExtDir().catch(() => null);
+  if (saved && (await hasPermission(saved, true)) && !(await checkExtensionDir(saved))) return saved;
+  updStep("Выберите папку, в которую распакован архив расширения (в ней лежит manifest.json). Это нужно один раз.");
+  let dir;
+  try {
+    dir = await window.showDirectoryPicker({ id: "pinboard-ext", mode: "readwrite", startIn: "documents" });
+  } catch (e) {
+    if (e.name === "AbortError") { updStep(""); return null; }
+    throw e;
+  }
+  const problem = await checkExtensionDir(dir);
+  if (problem) {
+    updStep(problem, true);
+    return null;
+  }
+  await saveExtDir(dir);
+  return dir;
+}
+
+$("updGo").addEventListener("click", async () => {
+  if (!release) return;
+  if (currentKey && !confirm("Сейчас идёт загрузка. Она прервётся, а после обновления продолжится с того же места. Обновить?")) return;
+  $("updGo").disabled = true;
+  try {
+    const dir = await getExtensionDir();
+    if (!dir) return;
+    await chrome.runtime.sendMessage({ type: "installing", version: release.version });
+    await installUpdate(dir, release, (t) => updStep(t));
+    updStep("Готово. Перезапускаю расширение…");
+    setTimeout(() => chrome.runtime.reload(), 400);
+  } catch (e) {
+    updStep(e.message || String(e), true);
+  } finally {
+    $("updGo").disabled = false;
+  }
+});
+
+$("updClose").addEventListener("click", () => { $("upd").hidden = true; });
+
+$("updCheck").addEventListener("click", async (e) => {
+  e.preventDefault();
+  $("updChecked").textContent = "проверяю…";
+  const u = await chrome.runtime.sendMessage({ type: "checkUpdate", force: true });
+  showRelease(u);
+  showChecked(u);
+});
+
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area === "local" && ch.update && !$("updGo").disabled) {
+    showRelease(ch.update.newValue);
+    showChecked(ch.update.newValue);
+  }
+});
+
+(async () => {
+  const { justUpdated, update } = await chrome.storage.local.get(["justUpdated", "update"]);
+  if (justUpdated && justUpdated.to === VERSION) {
+    await chrome.storage.local.remove("justUpdated");
+    $("upd").hidden = false;
+    $("updTitle").textContent = `Расширение обновлено до версии ${VERSION}`;
+    $("updSub").textContent = "Обновите открытые вкладки Pinterest (F5), чтобы на них заработала новая версия.";
+    $("updGo").hidden = true;
+    $("updClose").hidden = false;
+    if (update && update.notes && update.version === VERSION) {
+      $("updNotes").hidden = false;
+      renderNotes(update.notes, $("updNotesText"));
+    }
+    return;
+  }
+  showRelease(update);
+  showChecked(update);
+  const fresh = await chrome.runtime.sendMessage({ type: "checkUpdate" }).catch(() => null);
+  if (fresh) {
+    showRelease(fresh);
+    showChecked(fresh);
+  }
+})();

@@ -1,7 +1,34 @@
 // Разбирает ссылку (доска или пин), находит вкладку Pinterest, собирает в ней пины
-// и передаёт результат странице загрузки.
+// и передаёт результат странице загрузки. Заодно следит за новыми версиями на GitHub.
+
+importScripts("update.js");
 
 const PAGE = chrome.runtime.getURL("downloader.html");
+
+// ------------------------------------------------------------ обновления
+async function refreshBadge(update) {
+  const on = !!(update && update.version && compareVersions(update.version, currentVersion()) > 0);
+  await chrome.action.setBadgeText({ text: on ? "↑" : "" });
+  if (on) await chrome.action.setBadgeBackgroundColor({ color: "#1a7f37" });
+  await chrome.action.setTitle({
+    title: on ? `Доступна версия ${update.version} — откройте, чтобы обновить` : "Скачать доску Pinterest",
+  });
+}
+
+async function updateCheck(force) {
+  const u = await checkForUpdate(force);
+  await refreshBadge(u);
+  return u;
+}
+
+// фоновый скрипт просыпается часто — создаём напоминание один раз, а не при каждом пробуждении
+chrome.alarms.get("update-check").then((a) => {
+  if (!a) chrome.alarms.create("update-check", { periodInMinutes: 12 * 60, delayInMinutes: 1 });
+});
+chrome.alarms.onAlarm.addListener((a) => {
+  if (a.name === "update-check") updateCheck(false); // не чаще раза в 12 часов
+});
+chrome.runtime.onStartup.addListener(() => updateCheck(false));
 const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
   "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
 const PINTEREST_TABS = chrome.runtime.getManifest().host_permissions.filter((p) => p.includes("pinterest."));
@@ -146,6 +173,12 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
       await chrome.storage.local.set({ pending: pending.filter((p) => p.key !== msg.key) });
     } else if (msg.type === "open") {
       await openDownloader();
+    } else if (msg.type === "checkUpdate") {
+      reply(await updateCheck(!!msg.force));
+      return;
+    } else if (msg.type === "installing") {
+      // страница загрузок сейчас перезапустит расширение — запомним, чтобы потом сказать «Обновлено»
+      await chrome.storage.local.set({ justUpdated: { from: currentVersion(), to: msg.version } });
     }
     reply({ ok: true });
   })();
@@ -153,6 +186,15 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 });
 
 // ------------------------------------------------------------ меню правой кнопки
+chrome.runtime.onInstalled.addListener(async (details) => {
+  // после обновления в один клик открываем вкладку загрузок с сообщением «Обновлено»
+  const { justUpdated } = await chrome.storage.local.get("justUpdated");
+  if (details.reason === "update" && justUpdated && justUpdated.to === currentVersion()) {
+    await openDownloader();
+  }
+  updateCheck(true);
+});
+
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.removeAll(() => {
     chrome.contextMenus.create({

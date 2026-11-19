@@ -98,6 +98,24 @@
   details summary { cursor:pointer; }
   details div { word-break:break-all; font-size:12px; padding:2px 0; }
 
+  /* обновление */
+  .upd { padding:14px 16px; margin-bottom:12px; border-color:var(--ok); background:var(--ok-soft); }
+  .upd-head { display:flex; align-items:center; gap:14px; }
+  .upd .ico { width:40px; height:40px; border-radius:12px; background:var(--ok); color:#fff; display:grid; place-items:center; flex:none; }
+  .upd .ico svg { width:20px; height:20px; }
+  .upd .what { flex:1; min-width:0; }
+  .upd .what b { display:block; font-size:15px; }
+  .upd .what small { display:block; color:var(--muted); font-size:13px; }
+  .upd button.primary { background:var(--ok); }
+  .upd details { color:var(--fg); margin-top:10px; }
+  .upd .notes { font-size:13px; line-height:1.5; padding:6px 0 0 2px; word-break:normal; }
+  .upd .notes h4 { margin:10px 0 4px; font-size:13px; }
+  .upd .notes ul { margin:0; padding-left:18px; }
+  .upd .notes p { margin:4px 0; }
+  .upd-step { margin:10px 0 0; font-size:13px; color:var(--muted); }
+  .upd-step:empty { display:none; }
+  .upd-step.err { color:var(--warn); }
+
   footer { margin-top:28px; padding-top:16px; border-top:1px solid var(--line); color:var(--muted); font-size:13px; }
   footer p { margin:0 0 8px; }
   footer .meta { display:flex; flex-wrap:wrap; gap:6px 14px; }
@@ -123,6 +141,22 @@
       GitHub
     </a>
   </header>
+
+  <div class="card upd" id="upd" hidden>
+    <div class="upd-head">
+      <div class="ico" id="updIco">
+        <svg viewBox="0 0 24 24" aria-hidden="true"><path fill="currentColor" d="M11 21V8.4l-4.3 4.3-1.4-1.4L12 4.6l6.7 6.7-1.4 1.4L13 8.4V21z"/></svg>
+      </div>
+      <div class="what">
+        <b id="updTitle"></b>
+        <small id="updSub"></small>
+      </div>
+      <button class="primary" id="updGo" type="button">Обновить</button>
+      <button id="updClose" type="button" hidden>Понятно</button>
+    </div>
+    <details id="updNotes" hidden><summary>Что нового</summary><div class="notes" id="updNotesText"></div></details>
+    <p class="upd-step" id="updStep"></p>
+  </div>
 
   <div class="card folder">
     <div class="ico">
@@ -154,9 +188,12 @@
       <span id="verFoot"></span>
       <a id="repoFoot" target="_blank" rel="noopener">Исходный код на GitHub</a>
       <a id="issues" target="_blank" rel="noopener">Сообщить о проблеме</a>
+      <a href="#" id="updCheck">Проверить обновления</a>
+      <span id="updChecked"></span>
     </div>
   </footer>
 </main>
+<script src="update.js"></script>
 <script src="downloader.js"></script>
 </body>
 </html>
