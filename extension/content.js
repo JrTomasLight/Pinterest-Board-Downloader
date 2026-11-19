@@ -8,6 +8,8 @@
     "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
 
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+  const REQUEST_TIMEOUT = 30000;
+  const DETAILS_PARALLEL = 4;
 
   function csrf() {
     const m = document.cookie.match(/(?:^|;\s*)csrftoken=([^;]+)/);
@@ -49,17 +51,23 @@
 
     let lastErr;
     for (let attempt = 0; attempt < 4; attempt++) {
+      // без тайм-аута один зависший ответ Pinterest навсегда останавливает сбор пинов
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
       try {
         const r = await fetch(`${location.origin}/resource/${name}/get/?${params}`, {
           headers,
           credentials: "include",
+          signal: ctrl.signal,
         });
         if (r.ok) return (await r.json()).resource_response;
         lastErr = new Error(`${name}: HTTP ${r.status}`);
         if (r.status === 403 || r.status === 404) throw lastErr;
       } catch (e) {
-        lastErr = e;
+        lastErr = ctrl.signal.aborted ? new Error("Pinterest не ответил за 30 секунд") : e;
         if (/HTTP 40[34]/.test(String(e.message))) throw e;
+      } finally {
+        clearTimeout(timer);
       }
       await sleep(1500 * (attempt + 1));
     }
@@ -163,13 +171,25 @@
         if (pins.length % 25 === 0) progress(`${label}: найдено пинов ${pins.length}…`);
       }
     }
-    for (let i = 0; i < pins.length; i++) {
-      if (!needsDetails(pins[i])) continue;
-      try {
-        const full = (await resource("PinResource", { id: pins[i].id, field_set_key: "detailed" }, src)).data;
-        if (full) pins[i] = full;
-      } catch { /* оставляем как есть */ }
+    progress(`${label}: найдено пинов ${pins.length}`);
+    // у видео и story-пинов в ленте доски нет ссылок на файлы — дозапрашиваем их по несколько сразу
+    const todo = [];
+    pins.forEach((p, i) => needsDetails(p) && todo.push(i));
+    let next = 0, done = 0;
+    async function worker() {
+      while (next < todo.length) {
+        const i = todo[next++];
+        try {
+          const full = (await resource("PinResource", { id: pins[i].id, field_set_key: "detailed" }, src)).data;
+          if (full) pins[i] = full;
+        } catch { /* оставляем как есть */ }
+        done++;
+        if (done % 5 === 0 || done === todo.length) {
+          progress(`${label}: найдено пинов ${pins.length}, уточняю видео и story-пины: ${done} из ${todo.length}`);
+        }
+      }
     }
+    await Promise.all(Array.from({ length: DETAILS_PARALLEL }, worker));
     return pins;
   }
 
@@ -302,11 +322,12 @@
     chrome.runtime.onMessage.addListener((msg, _sender, reply) => {
       if (msg.cmd !== "collect") return;
       reply({ ok: true });
-      const progress = (text) => chrome.runtime.sendMessage({ type: "progress", text });
-      const job = msg.pins ? collectSinglePins(msg.pins, progress) : collectBoard(msg.board || location.href, progress);
-      job
-        .then((data) => chrome.runtime.sendMessage({ type: "collected", data }))
-        .catch((e) => chrome.runtime.sendMessage({ type: "error", text: String(e.message || e) }));
+      const job = msg.job; // по нему кнопка «Скачать доску» узнаёт, что происходит с её доской
+      const progress = (text) => chrome.runtime.sendMessage({ type: "progress", text, job });
+      const work = msg.pins ? collectSinglePins(msg.pins, progress) : collectBoard(msg.board || location.href, progress);
+      work
+        .then((data) => chrome.runtime.sendMessage({ type: "collected", data, job }))
+        .catch((e) => chrome.runtime.sendMessage({ type: "error", text: String(e.message || e), job }));
     });
   }
 })();

@@ -193,7 +193,6 @@
     '<path fill="currentColor" d="M11 3h2v9.6l3.3-3.3 1.4 1.4L12 16.4l-5.7-5.7 1.4-1.4 3.3 3.3V3zM5 19h14v2H5z"/></svg>' +
     "<span>Скачать доску</span>";
   const boardLabel = boardBtn.querySelector("span");
-  let boardBusy = false;
 
   const opaque = (c) => c && c !== "transparent" && !/rgba\([^)]*,\s*0(\.0+)?\)$/.test(c);
 
@@ -210,10 +209,12 @@
       display: "inline-flex", alignItems: "center", gap: "6px", whiteSpace: "nowrap", boxSizing: "border-box",
       height: Math.round(r.height || 48) + "px", padding: "0 16px", border: "0", margin: "0",
       borderRadius: face && cs.borderRadius !== "0px" ? cs.borderRadius : "16px",
-      background: face ? cs.backgroundColor : "#e9e9e9",
-      color: face ? cs.color : "#111",
       font: "600 14px/1 system-ui, -apple-system, Segoe UI, sans-serif", cursor: "pointer",
+      fontVariantNumeric: "tabular-nums",
     });
+    look.bg = face ? cs.backgroundColor : "#e9e9e9";
+    look.color = face ? cs.color : "#111";
+    paint();
   }
 
   // выравниваем по верхнему краю «Поделиться»
@@ -228,6 +229,7 @@
       boardBtn.remove();
       return;
     }
+    follow(boardKey(location.href));
     const share = findShare();
     if (!share) return;
     const item = rowItem(share);
@@ -240,31 +242,117 @@
     alignWith(share);
   }
 
+  // ---------------------------------------------------------------- прогресс доски на кнопке
+  // Вкладка загрузок и фоновый скрипт пишут этап в storage (job:<адрес доски>), кнопка его показывает:
+  // поиск пинов → очередь → сверка → «12 / 340» с заполнением → итог. Итог виден SHOW_RESULT мс.
+  const SHOW_RESULT = 12000;
+  const ACTIVE = new Set(["collect", "queued", "folder", "sync", "download"]);
+  const IDLE_TITLE = "Скачать всю доску через Pinterest Board Downloader";
+  const look = { bg: "#e9e9e9", color: "#111" };
+  let jobKey = null;   // доска, на странице которой мы сейчас
+  let job = null;      // её последнее состояние
+  let resultTimer = null;
+
+  const boardKey = (href) => {
+    try {
+      return new URL(href).pathname.split("/").filter(Boolean).map((p) => decodeURIComponent(p).toLowerCase()).join("/");
+    } catch {
+      return null;
+    }
+  };
+
+  // текст, подсказка, заполнение (0…1 или null) и цвет итога
+  function view(s) {
+    if (!s) return { text: "Скачать доску", title: IDLE_TITLE };
+    const more = " Нажмите, чтобы открыть вкладку загрузок.";
+    switch (s.phase) {
+      case "collect": {
+        const title = (s.text || "Ищу пины на доске") + more;
+        const d = /уточняю[^:]*: (\d+) из (\d+)/.exec(s.text || "");
+        if (d) return { text: `Уточняю видео ${d[1]} / ${d[2]}`, fill: +d[1] / +d[2], title };
+        const m = /найдено пинов (\d+)/.exec(s.text || "");
+        return { text: m ? `Найдено пинов: ${m[1]}` : "Ищу пины…", title };
+      }
+      case "queued":
+        return { text: "В очереди", title: `Найдено пинов: ${s.found}. Доска ждёт своей очереди во вкладке загрузок.` +
+          (s.gated ? " Найдены не все пины — похоже, вы не вошли в аккаунт." : "") + more };
+      case "folder":
+        return { text: "Выберите папку", title: "Откройте вкладку загрузок и выберите папку для сохранения." + more, fill: null };
+      case "sync":
+        return { text: "Сверяю…", title: (s.text || "Сверяю с уже скачанным") + more };
+      case "download": {
+        const all = s.total || 0, ok = (s.done || 0) + (s.failed || 0);
+        return { text: `Скачиваю ${s.done} / ${all}`, fill: all ? ok / all : 1,
+          title: `Скачано ${s.done} из ${all}` + (s.failed ? `, ошибок: ${s.failed}` : "") + "." + more };
+      }
+      case "done":
+        if (s.failed) return { text: `Готово, ошибок: ${s.failed}`, tone: "warn",
+          title: `Скачано ${s.done} из ${s.total}. Что не скачалось — во вкладке загрузок.` };
+        if (!s.fresh) return { text: "✓ Новых пинов нет", tone: "ok",
+          title: `Всё уже было в папке (файлов: ${s.total}). Убранные с доски пины перенесены в «_убраны с доски».` };
+        return { text: `✓ Скачано новых: ${s.fresh}`, tone: "ok", title: `Всего файлов доски в папке: ${s.done}.` };
+      case "cancelled":
+        return { text: "Отменено", title: "Загрузку отменили. Уже скачанное осталось в папке." };
+      case "removed":
+        return { text: "Убрано из очереди", title: "Доску убрали из очереди во вкладке загрузок." };
+      case "failed":
+      case "error":
+        return { text: "Ошибка", tone: "bad", title: s.text || "Что-то пошло не так" };
+    }
+    return { text: "Скачать доску", title: IDLE_TITLE };
+  }
+
+  const TONES = { ok: ["#1a7f37", "#fff"], warn: ["#9a6700", "#fff"], bad: ["#b3261e", "#fff"] };
+
+  function paint() {
+    clearTimeout(resultTimer);
+    let s = job;
+    // итог показываем недолго — потом кнопка снова «Скачать доску»
+    if (s && !ACTIVE.has(s.phase)) {
+      const left = SHOW_RESULT - (Date.now() - (s.at || 0));
+      if (left <= 0) s = null;
+      else resultTimer = setTimeout(paint, left);
+    }
+    const v = view(s);
+    boardLabel.textContent = v.text;
+    boardBtn.title = v.title;
+    boardBtn.setAttribute("aria-label", v.text);
+    const [bg, color] = TONES[v.tone] || [look.bg, look.color];
+    boardBtn.style.backgroundColor = bg;
+    boardBtn.style.color = color;
+    // заполнение кнопки слева направо — как полоса прогресса
+    boardBtn.style.backgroundImage = v.fill != null
+      ? `linear-gradient(to right, rgba(0,0,0,.16) ${Math.round(v.fill * 100)}%, transparent 0)` : "none";
+  }
+
+  async function follow(key) {
+    if (key === jobKey) return;
+    jobKey = key;
+    job = null;
+    if (key) {
+      const got = await chrome.storage.local.get("job:" + key).catch(() => ({}));
+      if (jobKey === key) job = got["job:" + key] || null;
+    }
+    paint();
+  }
+
+  chrome.storage.onChanged.addListener((ch, area) => {
+    if (area !== "local" || !jobKey || !ch["job:" + jobKey]) return;
+    job = ch["job:" + jobKey].newValue || null;
+    paint();
+  });
+
   boardBtn.addEventListener("click", (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (boardBusy) return;
-    boardBusy = true;
-    boardLabel.textContent = "Собираю пины…";
-    let timer = null;
-    const finish = (text) => {
-      chrome.storage.onChanged.removeListener(watch);
-      clearTimeout(timer);
-      boardLabel.textContent = text;
-      setTimeout(() => {
-        boardBusy = false;
-        boardLabel.textContent = "Скачать доску";
-      }, 2500);
-    };
-    const watch = (ch, area) => {
-      const st = area === "local" && ch.status && ch.status.newValue;
-      if (!st) return;
-      if (st.error) finish("Ошибка");
-      else if (st.done) finish("✓ В очереди");
-    };
-    chrome.storage.onChanged.addListener(watch);
-    timer = setTimeout(() => finish("Скачать доску"), 120000);
-    chrome.runtime.sendMessage({ type: "download", url: location.href });
+    // уже идёт — показываем, где именно
+    if (job && ACTIVE.has(job.phase)) {
+      chrome.runtime.sendMessage({ type: "open" });
+      return;
+    }
+    job = { phase: "collect", text: "Ищу пины…", at: Date.now() };
+    paint();
+    chrome.runtime.sendMessage({ type: "download", url: location.href, job: jobKey });
   });
 
   // Pinterest перерисовывает страницу без перезагрузки — следим и возвращаем кнопку на место

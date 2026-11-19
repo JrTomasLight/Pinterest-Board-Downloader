@@ -2,6 +2,19 @@
 // (без окна «Сохранить как» на каждый файл).
 
 const PARALLEL = 4;
+const FILE_OPS_PARALLEL = 8; // одновременных переименований и переносов при сверке
+
+// выполняет fn для каждого элемента, не больше limit одновременно
+async function pool(items, limit, fn) {
+  let next = 0;
+  async function worker() {
+    while (next < items.length) {
+      const i = next++;
+      await fn(items[i], i);
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
+}
 const $ = (id) => document.getElementById(id);
 
 // ------------------------------------------------------------ версия и ссылки
@@ -108,9 +121,11 @@ const restOf = (stem) => stem.replace(NUM, ""); // id пина (+ _01 для к�
 
 // Файлы пинов в папке, сгруппированные по id пина (без номера позиции):
 // так скачанный пин узнаётся, даже если на доске он сдвинулся.
-async function existingPinFiles(dir) {
+async function existingPinFiles(dir, step) {
   const map = new Map(); // id -> [имена файлов]
+  let seenFiles = 0;
   for await (const [name, h] of dir.entries()) {
+    if (++seenFiles % 200 === 0) step(`Сверяю с уже скачанным… просмотрено файлов: ${seenFiles}`);
     if (h.kind !== "file" || name.endsWith(".crswap") || !NUM.test(name)) continue;
     const rest = restOf(name.replace(/\.[^.]+$/, ""));
     if (!map.has(rest)) map.set(rest, []);
@@ -120,13 +135,18 @@ async function existingPinFiles(dir) {
 }
 
 // Переименование/перенос файла. move() есть не во всех версиях браузера — тогда копируем.
+// Если move() не сработал несколько раз подряд, дальше сразу копируем, не тратя на него время.
+let moveFails = 0;
 async function moveFile(dir, name, targetDir, newName) {
   const h = await dir.getFileHandle(name);
-  if (h.move) {
+  if (h.move && moveFails < 3) {
     try {
       await (targetDir === dir ? h.move(newName) : h.move(targetDir, newName));
+      moveFails = 0;
       return;
-    } catch { /* пробуем копированием */ }
+    } catch {
+      moveFails++; // пробуем копированием
+    }
   }
   const file = await h.getFile();
   const nh = await targetDir.getFileHandle(newName, { create: true });
@@ -156,7 +176,7 @@ async function moveDir(parent, oldName, newName) {
 }
 
 // Разделы тоже нумеруются: если раздел сдвинулся, переименовываем его папку.
-async function renumberSections(rootFolder) {
+async function renumberSections(rootFolder, step = () => {}) {
   if (!rootFolder.subfolders.length) return 0;
   const rootDir = await getDir(rootFolder.path);
   const dirs = [];
@@ -168,6 +188,7 @@ async function renumberSections(rootFolder) {
     if (dirs.includes(s.dir)) continue;
     const old = dirs.find((d) => !wanted.has(d) && /^\d+ /.test(d) && title(d) === title(s.dir));
     if (!old) continue;
+    step(`Переименовываю папку раздела «${old}» → «${s.dir}»…`);
     await moveDir(rootDir, old, s.dir);
     dirs.splice(dirs.indexOf(old), 1, s.dir);
     moved++;
@@ -204,9 +225,9 @@ async function syncSingles(folder, dir, stats) {
   return jobs;
 }
 
-async function syncFolder(folder, dir, stats) {
+async function syncFolder(folder, dir, stats, step = () => {}) {
   if (folder.single) return syncSingles(folder, dir, stats);
-  const have = await existingPinFiles(dir);
+  const have = await existingPinFiles(dir, step);
   const jobs = [];
   let removedDir = null;
   const putAway = async (name) => {
@@ -234,14 +255,23 @@ async function syncFolder(folder, dir, stats) {
     });
   }
 
-  for (const r of renames) for (const n of r.extra) await putAway(n); // дубликаты
-  for (const names of have.values()) for (const n of names) await putAway(n); // убраны с доски
+  // Каждый перенос и переименование виден в прогрессе — на большой доске их могут быть тысячи.
+  // Делаем их по несколько сразу: файлы разных пинов друг другу не мешают.
+  const away = [...renames.flatMap((r) => r.extra), ...[...have.values()].flat()]; // дубликаты и убранные с доски
+  if (away.length) removedDir = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
+  let n = 0;
+  await pool(away, FILE_OPS_PARALLEL, async (name) => {
+    await putAway(name);
+    step(`Убираю файлы пинов, которых больше нет на доске: ${++n} из ${away.length}`);
+  });
   // в имени есть id пина, поэтому новое имя не может быть занято другим пином
-  for (const r of renames) {
-    if (r.keep === r.target) continue;
+  const moves = renames.filter((r) => r.keep !== r.target);
+  let m = 0;
+  await pool(moves, FILE_OPS_PARALLEL, async (r) => {
     await moveFile(dir, r.keep, dir, r.target);
     stats.renamed++;
-  }
+    step(`Перенумеровываю файлы: ${++m} из ${moves.length}`);
+  });
   return jobs;
 }
 
@@ -540,10 +570,20 @@ async function downloadBoard(board, view) {
   dirCache.clear(); // папки разделов могли переименоваться
   const stats = { total: 0, done: 0, renamed: 0, removed: 0 };
   const jobs = [];
-  await renumberSections(board.folders[0]);
+  // сверка большой доски может идти долго — показываем каждый шаг, а не одну надпись
+  let lastStep = 0;
+  const step = (text) => {
+    checkCancel();
+    const now = Date.now();
+    if (now - lastStep < 250) return;
+    lastStep = now;
+    view.status(text);
+  };
+  await renumberSections(board.folders[0], step);
   for (const folder of board.folders) {
     checkCancel();
-    jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats)));
+    if (board.folders.length > 1) view.status(`Сверяю с уже скачанным: «${folder.title}»…`);
+    jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats, step)));
   }
   const total = stats.total;
   let done = stats.done, failed = 0;
@@ -572,6 +612,7 @@ async function downloadBoard(board, view) {
   }
   await Promise.all(Array.from({ length: PARALLEL }, worker));
   checkCancel();
+  view.status("Пишу галерею…");
 
   for (const folder of board.folders) {
     if (folder.single) continue; // для отдельных пинов галерея не нужна
@@ -585,7 +626,86 @@ async function downloadBoard(board, view) {
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
   }
-  return { done, total, failed };
+  return { done, total, failed, fresh: jobs.length };
+}
+
+// ------------------------------------------------------------ состояние для кнопки на странице доски
+// Кнопка «Скачать доску» на Pinterest читает job:<адрес доски> и показывает этап и прогресс.
+function setJob(job, state) {
+  if (!job) return Promise.resolve();
+  return chrome.storage.local.set({ ["job:" + job]: { ...state, at: Date.now() } }).catch(() => {});
+}
+
+// оборачивает вид доски: всё, что показывается здесь, коротко уходит и на кнопку (не чаще 3 раз в секунду)
+function reportingView(view, job) {
+  if (!job) return view;
+  let last = 0, timer = null, latest = null;
+  const flush = () => {
+    timer = null;
+    last = Date.now();
+    setJob(job, latest);
+  };
+  const push = (state, now) => {
+    latest = state;
+    if (now) {
+      clearTimeout(timer);
+      flush();
+    } else if (!timer) {
+      timer = setTimeout(flush, Math.max(0, 300 - (Date.now() - last)));
+    }
+  };
+  return {
+    ...view,
+    status(text) {
+      view.status(text);
+      push({ phase: "sync", text }, true);
+    },
+    update(done, total, failed) {
+      view.update(done, total, failed);
+      push({ phase: "download", done, total, failed }, done + failed >= total);
+    },
+    final(state) {
+      clearTimeout(timer);
+      timer = null;
+      setJob(job, state);
+    },
+  };
+}
+
+// ------------------------------------------------------------ уведомления
+// Если вкладка загрузок в фоне, о конце каждой доски или пина сообщаем системным уведомлением.
+function notify(data, title, message) {
+  if (!document.hidden || !chrome.notifications) return;
+  try { // уведомление — не главное: если не вышло, загрузка всё равно считается удачной
+    chrome.notifications.create("done-" + Date.now(), {
+      type: "basic",
+      iconUrl: chrome.runtime.getURL("icons/128.png"),
+      title,
+      message,
+      contextMessage: "Pinterest Board Downloader",
+    }, () => void chrome.runtime.lastError);
+  } catch { /* без уведомления */ }
+}
+
+function notifyResult(data, r) {
+  const single = data.folders[0] && data.folders[0].single;
+  const name = single ? data.title : `Доска «${data.title}»`;
+  if (r.failed) notify(data, `${name} скачана с ошибками`, `Скачано ${r.done} из ${r.total}, не скачалось: ${r.failed}. Подробности — во вкладке загрузок.`);
+  else if (!r.fresh && r.total) notify(data, `${name}: новых пинов нет`, `Всё уже было в папке (файлов: ${r.total}).`);
+  else notify(data, single ? `${name} — скачано` : `${name} успешно скачана`, `Новых файлов: ${r.fresh}, всего в папке: ${r.done}.`);
+}
+
+if (chrome.notifications) {
+  // нажатие на уведомление — к вкладке загрузок
+  chrome.notifications.onClicked.addListener(async (id) => {
+    if (!id.startsWith("done-")) return;
+    chrome.notifications.clear(id);
+    const t = await chrome.tabs.getCurrent();
+    if (t) {
+      await chrome.tabs.update(t.id, { active: true });
+      await chrome.windows.update(t.windowId, { focused: true });
+    }
+  });
 }
 
 // ------------------------------------------------------------ очередь досок
@@ -647,6 +767,7 @@ async function renderQueue() {
     rm.addEventListener("click", async () => {
       rm.disabled = true;
       seen.add(p.key);
+      await setJob(p.job, { phase: "removed" });
       await chrome.runtime.sendMessage({ type: "taken", key: p.key });
       renderQueue();
     });
@@ -685,6 +806,9 @@ async function run() {
   running = true; // ставим сразу: пока ждём папку, могут прийти новые доски
   if (!(await ensureRoot())) {
     running = false;
+    // доски ждут, пока выберут папку, — пусть кнопка на странице доски об этом скажет
+    const { pending = [] } = await chrome.storage.local.get("pending");
+    for (const p of pending) if (!seen.has(p.key)) await setJob(p.job, { phase: "folder" });
     return;
   }
   try {
@@ -698,16 +822,22 @@ async function run() {
 
       const ctrl = new AbortController();
       activeSignal = ctrl.signal;
-      const view = boardView(item.data, () => ctrl.abort());
+      const view = reportingView(boardView(item.data, () => ctrl.abort()), item.job);
       try {
         const r = await downloadBoard(item.data, view);
-        view.finish(`Готово ${r.done} из ${r.total}`, "done");
+        view.finish(r.fresh || r.failed || !r.total ? `Готово ${r.done} из ${r.total}`
+          : `Новых пинов нет — все файлы (${r.total}) уже были в папке`, "done");
+        if (view.final) view.final({ phase: "done", ...r });
+        notifyResult(item.data, r);
       } catch (e) {
         if (ctrl.signal.aborted) {
           view.finish("Отменено. Уже скачанное осталось в папке, повторный запуск докачает остальное.", "cancelled");
+          if (view.final) view.final({ phase: "cancelled" });
         } else {
           view.finish("Не удалось сохранить", "failed");
           view.error(e.message || String(e));
+          if (view.final) view.final({ phase: "failed", text: e.message || String(e) });
+          notify(item.data, `Не удалось скачать «${item.data.title}»`, e.message || String(e));
         }
       } finally {
         activeSignal = null;

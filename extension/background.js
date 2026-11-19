@@ -28,7 +28,15 @@ chrome.alarms.get("update-check").then((a) => {
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === "update-check") updateCheck(false); // не чаще раза в 12 часов
 });
-chrome.runtime.onStartup.addListener(() => updateCheck(false));
+chrome.runtime.onStartup.addListener(async () => {
+  updateCheck(false);
+  // состояния досок от прошлого запуска браузера кнопкам уже не нужны; очередь сохраняется
+  const all = await chrome.storage.local.get(null);
+  const { pending = [] } = all;
+  const keep = new Set(pending.map((p) => p.job && "job:" + p.job));
+  const old = Object.keys(all).filter((k) => k.startsWith("job:") && !keep.has(k));
+  if (old.length) await chrome.storage.local.remove(old);
+});
 const RESERVED = new Set(["pin", "search", "ideas", "today", "settings", "business", "_", "resource",
   "login", "signup", "explore", "news_hub", "notifications", "messages", "shopping"]);
 const PINTEREST_TABS = chrome.runtime.getManifest().host_permissions.filter((p) => p.includes("pinterest."));
@@ -101,18 +109,37 @@ async function pinterestTab(preferId) {
   return t.id;
 }
 
-async function startCollect(target, preferTabId) {
+async function startCollect(target, preferTabId, job) {
   const tabId = await pinterestTab(preferTabId);
   await chrome.scripting.executeScript({ target: { tabId }, files: ["content.js"] });
-  await chrome.tabs.sendMessage(tabId, { cmd: "collect", ...target });
+  await chrome.tabs.sendMessage(tabId, { cmd: "collect", ...target, job });
 }
 
-async function download(url, tabId) {
+// ------------------------------------------------------------ состояние досок для кнопки на странице
+// Ключ — адрес доски без домена: одна и та же доска на pinterest.com и pinterest.ru — одна запись.
+function boardKey(url) {
+  try {
+    const parts = new URL(url).pathname.split("/").filter(Boolean).map((p) => decodeURIComponent(p).toLowerCase());
+    return parts.join("/");
+  } catch {
+    return null;
+  }
+}
+
+async function setJob(job, state) {
+  if (job) await chrome.storage.local.set({ ["job:" + job]: { ...state, at: Date.now() } });
+}
+
+async function download(url, tabId, job) {
   await setStatus({ text: "Ищу пины…" });
   try {
-    await startCollect(await classify(url), tabId);
+    const target = await classify(url);
+    if (!job && target.board) job = boardKey(target.board);
+    await setJob(job, { phase: "collect", text: "Ищу пины…" });
+    await startCollect(target, tabId, job);
   } catch (e) {
     await setStatus({ error: e.message || String(e) });
+    await setJob(job, { phase: "error", text: e.message || String(e) });
   }
 }
 
@@ -147,17 +174,20 @@ async function setStatus(status) {
 chrome.runtime.onMessage.addListener((msg, sender, reply) => {
   (async () => {
     if (msg.type === "download") {
-      await download(msg.url, msg.tabId || (sender.tab && sender.tab.id));
+      await download(msg.url, msg.tabId || (sender.tab && sender.tab.id), msg.job);
     } else if (msg.type === "progress") {
       await setStatus({ text: msg.text });
+      await setJob(msg.job, { phase: "collect", text: msg.text });
     } else if (msg.type === "error") {
       closeTemp(sender.tab);
       await setStatus({ error: msg.text });
+      await setJob(msg.job, { phase: "error", text: msg.text });
     } else if (msg.type === "collected") {
       closeTemp(sender.tab);
       const { pending = [] } = await chrome.storage.local.get("pending");
-      pending.push({ key: `${msg.data.id}-${Date.now()}`, data: msg.data });
+      pending.push({ key: `${msg.data.id}-${Date.now()}`, data: msg.data, job: msg.job || null });
       await chrome.storage.local.set({ pending });
+      await setJob(msg.job, { phase: "queued", found: msg.data.found, gated: !!msg.data.gated });
       await setStatus({ text: `${msg.data.title}: загрузка идёт во вкладке загрузок.`, done: true });
       await openDownloader();
     } else if (msg.type === "reorder") {
