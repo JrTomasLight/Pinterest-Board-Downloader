@@ -143,6 +143,9 @@ async function checkExtensionDir(dir) {
   }
   const me = chrome.runtime.getManifest();
   if (m.name !== me.name) return "Это папка другого расширения.";
+  // файлы в папке уже новее (распаковали вручную или обновили через git), а браузер ещё не перезапустил
+  // расширение — тут нужен только перезапуск, это решает вызывающий код
+  if (compareVersions(m.version, me.version) > 0) return { ahead: m.version };
   if (m.version !== me.version) {
     return `В этой папке версия ${m.version}, а установлена ${me.version}. Выберите папку, из которой расширение загружено в браузер.`;
   }

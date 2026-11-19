@@ -938,7 +938,11 @@ function showChecked(u) {
 // Папка, из которой расширение загружено в браузер: спрашиваем один раз и запоминаем.
 async function getExtensionDir() {
   const saved = await loadExtDir().catch(() => null);
-  if (saved && (await hasPermission(saved, true)) && !(await checkExtensionDir(saved))) return saved;
+  if (saved && (await hasPermission(saved, true))) {
+    const problem = await checkExtensionDir(saved);
+    if (!problem) return saved;
+    if (problem.ahead) return { dir: saved, ahead: problem.ahead };
+  }
   updStep("Выберите папку, в которую распакован архив расширения (в ней лежит manifest.json). Это нужно один раз.");
   let dir;
   try {
@@ -948,6 +952,10 @@ async function getExtensionDir() {
     throw e;
   }
   const problem = await checkExtensionDir(dir);
+  if (problem && problem.ahead) {
+    await saveExtDir(dir);
+    return { dir, ahead: problem.ahead };
+  }
   if (problem) {
     updStep(problem, true);
     return null;
@@ -963,6 +971,13 @@ $("updGo").addEventListener("click", async () => {
   try {
     const dir = await getExtensionDir();
     if (!dir) return;
+    if (dir.ahead) {
+      // новые файлы уже на месте — достаточно перезапустить расширение
+      await chrome.runtime.sendMessage({ type: "installing", version: dir.ahead });
+      updStep(`В папке уже версия ${dir.ahead} — перезапускаю расширение…`);
+      setTimeout(() => chrome.runtime.reload(), 600);
+      return;
+    }
     await chrome.runtime.sendMessage({ type: "installing", version: release.version });
     await installUpdate(dir, release, (t) => updStep(t));
     updStep("Готово. Перезапускаю расширение…");
