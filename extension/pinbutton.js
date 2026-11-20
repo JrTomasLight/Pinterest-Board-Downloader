@@ -242,7 +242,7 @@
   // Вкладка загрузок и фоновый скрипт пишут этап в storage (job:<адрес доски>), кнопка его показывает:
   // поиск пинов → очередь → сверка → «12 / 340» с заполнением → итог. Итог виден SHOW_RESULT мс.
   const SHOW_RESULT = 12000;
-  const { ACTIVE, boardKey } = PBD;
+  const { isActive, boardKey } = PBD;
   const IDLE_TITLE = "Скачать всю доску через Pinterest Board Downloader";
   const look = { bg: "#e9e9e9", color: "#111" };
   let jobKey = null;   // доска, на странице которой мы сейчас
@@ -297,7 +297,7 @@
     clearTimeout(resultTimer);
     let s = job;
     // итог показываем недолго — потом кнопка снова «Скачать доску»
-    if (s && !ACTIVE.has(s.phase)) {
+    if (s && !isActive(s)) {
       const left = SHOW_RESULT - (Date.now() - (s.at || 0));
       if (left <= 0) s = null;
       else resultTimer = setTimeout(paint, left);
@@ -335,7 +335,7 @@
     e.preventDefault();
     e.stopPropagation();
     // уже идёт — показываем, где именно
-    if (job && ACTIVE.has(job.phase)) {
+    if (isActive(job)) {
       chrome.runtime.sendMessage({ type: "open" });
       return;
     }

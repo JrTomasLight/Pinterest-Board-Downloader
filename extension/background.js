@@ -28,14 +28,34 @@ chrome.alarms.get("update-check").then((a) => {
 chrome.alarms.onAlarm.addListener((a) => {
   if (a.name === "update-check") updateCheck(false); // не чаще раза в 12 часов
 });
-chrome.runtime.onStartup.addListener(async () => {
-  updateCheck(false);
-  // состояния досок от прошлого запуска браузера кнопкам уже не нужны; очередь сохраняется
+// После перезапуска браузера или расширения ни один сбор и ни одна загрузка уже не идут:
+// старые состояния досок убираем, а доски из очереди снова показываем как «В очереди».
+// Иначе кнопки и список «Мои доски» навсегда застревали бы на «Ищу пины…».
+async function resetJobs() {
   const all = await chrome.storage.local.get(null);
-  const { pending = [] } = all;
-  const keep = new Set(pending.map((p) => p.job && "job:" + p.job));
-  const old = Object.keys(all).filter((k) => k.startsWith("job:") && !keep.has(k));
-  if (old.length) await chrome.storage.local.remove(old);
+  const queued = new Set((all.pending || []).map((p) => p.job).filter(Boolean));
+  const remove = [], set = {};
+  for (const [k, v] of Object.entries(all)) {
+    if (!k.startsWith("job:")) continue;
+    if (!queued.has(k.slice(4))) remove.push(k);
+    else if (!v || v.phase !== "queued") set[k] = { phase: "queued", at: Date.now() };
+  }
+  if (remove.length) await chrome.storage.local.remove(remove);
+  if (Object.keys(set).length) await chrome.storage.local.set(set);
+  await chrome.storage.local.remove(["queueOwner", "status"]);
+}
+
+chrome.runtime.onStartup.addListener(() => {
+  updateCheck(false);
+  resetJobs();
+});
+
+// «Перезагрузить расширение» во вкладке загрузок: после перезапуска открываем её снова
+chrome.storage.local.get("reopenDownloader").then(async ({ reopenDownloader }) => {
+  if (!reopenDownloader) return;
+  await chrome.storage.local.remove("reopenDownloader");
+  await resetJobs();
+  await openDownloader();
 });
 const { isPinterestHost, isBoardPath, isProfilePath, boardKey } = PBD;
 const PINTEREST_TABS = chrome.runtime.getManifest().host_permissions.filter((p) => p.includes("pinterest."));
@@ -366,6 +386,7 @@ chrome.runtime.onMessage.addListener((msg, sender, reply) => {
 
 // ------------------------------------------------------------ меню правой кнопки
 chrome.runtime.onInstalled.addListener(async (details) => {
+  await resetJobs();
   // после обновления в один клик открываем вкладку загрузок с сообщением «Обновлено»
   const { justUpdated } = await chrome.storage.local.get("justUpdated");
   if (details.reason === "update" && justUpdated && justUpdated.to === currentVersion()) {

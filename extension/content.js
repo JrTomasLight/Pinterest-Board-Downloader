@@ -35,7 +35,9 @@
     return cachedVersion;
   }
 
-  async function resource(name, options, sourceUrl) {
+  // onRetry(попытка, причина) — сообщить, что Pinterest ответил ошибкой и запрос повторяется:
+  // так видно, что сбор не завис, а ждёт сайт
+  async function resource(name, options, sourceUrl, onRetry) {
     const params = new URLSearchParams({
       source_url: sourceUrl,
       data: JSON.stringify({ options, context: {} }),
@@ -51,8 +53,9 @@
     const v = await appVersion();
     if (v) headers["X-APP-VERSION"] = v;
 
-    let lastErr;
+    let lastErr, status = 0;
     for (let attempt = 0; attempt < 4; attempt++) {
+      if (attempt && onRetry) onRetry(attempt + 1, lastErr && lastErr.message);
       // без тайм-аута один зависший ответ Pinterest навсегда останавливает сбор пинов
       const ctrl = new AbortController();
       const timer = setTimeout(() => ctrl.abort(), REQUEST_TIMEOUT);
@@ -63,7 +66,8 @@
           signal: ctrl.signal,
         });
         if (r.ok) return (await r.json()).resource_response;
-        lastErr = new Error(`${name}: HTTP ${r.status}`);
+        status = r.status;
+        lastErr = new Error(r.status === 429 ? "Pinterest просит подождать (слишком много запросов)" : `${name}: HTTP ${r.status}`);
         if (r.status === 403 || r.status === 404) throw lastErr;
       } catch (e) {
         lastErr = ctrl.signal.aborted ? new Error("Pinterest не ответил за 30 секунд") : e;
@@ -71,17 +75,18 @@
       } finally {
         clearTimeout(timer);
       }
-      await sleep(1500 * (attempt + 1));
+      // «слишком много запросов» — ждём заметно дольше, иначе Pinterest откажет снова
+      await sleep((status === 429 ? 10000 : 1500) * (attempt + 1));
     }
     throw lastErr;
   }
 
-  async function* paginate(name, options, src) {
+  async function* paginate(name, options, src, onRetry) {
     let bookmark = null;
     while (true) {
       const opts = { ...options };
       if (bookmark) opts.bookmarks = [bookmark];
-      const r = await resource(name, opts, src);
+      const r = await resource(name, opts, src, onRetry);
       for (const item of r.data || []) yield item;
       bookmark = r.bookmark;
       if (!bookmark || bookmark === "-end-") return;
@@ -157,6 +162,10 @@
     return isBoardPath(parts) ? { user: parts[0], slug: parts[1], section: parts[2] || null } : null;
   }
 
+  // текст для повтора запроса: «Доска: Pinterest не ответил за 30 секунд — пробую ещё раз (2 из 4)…»
+  const retryNote = (label, progress) => (n, why) =>
+    progress(`${label}: ${why || "Pinterest не ответил"} — пробую ещё раз (${n} из 4)…`);
+
   async function collectPins(iter, src, label, progress) {
     const pins = [];
     for await (const item of iter) {
@@ -174,7 +183,8 @@
       while (next < todo.length) {
         const i = todo[next++];
         try {
-          const full = (await resource("PinResource", { id: pins[i].id, field_set_key: "detailed" }, src)).data;
+          const full = (await resource("PinResource", { id: pins[i].id, field_set_key: "detailed" }, src,
+            retryNote(label, progress))).data;
           if (full) pins[i] = full;
         } catch { /* оставляем как есть */ }
         done++;
@@ -216,7 +226,7 @@
     // в заголовках запроса допустима только латиница, поэтому кириллицу в адресе кодируем
     const src = `/${encodeURIComponent(b.user)}/${encodeURIComponent(b.slug)}/`;
     const board = (await resource("BoardResource",
-      { username: b.user, slug: b.slug, field_set_key: "detailed" }, src)).data;
+      { username: b.user, slug: b.slug, field_set_key: "detailed" }, src, retryNote("Доска", progress))).data;
     if (!board || !board.id) throw new Error("Доска не найдена.");
 
     const rootName = safeName(`${b.user} - ${board.name || b.slug}`);
@@ -225,7 +235,7 @@
 
     let sections = [];
     if (board.section_count) {
-      for await (const s of paginate("BoardSectionsResource", { board_id: board.id }, src)) sections.push(s);
+      for await (const s of paginate("BoardSectionsResource", { board_id: board.id }, src, retryNote("Разделы", progress))) sections.push(s);
     }
     // номер папки раздела — его место на доске, даже если скачивается один раздел
     const width = String(sections.length).length;
@@ -246,7 +256,8 @@
       const label = `Раздел «${s.title}»`;
       progress(`${label}…`);
       const pins = await collectPins(
-        paginate("BoardSectionPinsResource", { section_id: s.id, page_size: 25 }, src), src, label, progress);
+        paginate("BoardSectionPinsResource", { section_id: s.id, page_size: 25 }, src, retryNote(label, progress)),
+        src, label, progress);
       found += pins.length;
       folders.push(toFolder(`${rootPath}/${dir}`, `${board.name} / ${s.title}`, pins));
       subfolders.push({ name: s.title || dir, dir });
@@ -258,7 +269,7 @@
         paginate("BoardFeedResource", {
           board_id: board.id, board_url: src, page_size: 25,
           field_set_key: "react_grid_pin", filter_section_pins: true,
-        }, src), src, "Доска", progress);
+        }, src, retryNote("Доска", progress)), src, "Доска", progress);
       found += rootPins.length;
     }
     const root = toFolder(rootPath, board.name || b.slug, rootPins);
@@ -304,7 +315,7 @@
       progress(`Пин ${id}…`);
       let resp;
       try {
-        resp = await resource("PinResource", { id, field_set_key: "detailed" }, `/pin/${id}/`);
+        resp = await resource("PinResource", { id, field_set_key: "detailed" }, `/pin/${id}/`, retryNote(`Пин ${id}`, progress));
       } catch (e) {
         throw new Error(/HTTP 404/.test(e.message) ? `Пин ${id} не найден (удалён или скрыт).` : e.message);
       }

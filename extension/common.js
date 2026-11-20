@@ -9,6 +9,11 @@ self.PBD = (() => {
 
   // этапы загрузки доски, пока она не закончилась
   const ACTIVE = new Set(["collect", "queued", "folder", "sync", "download"]);
+  // Сбор, сверка и скачивание сообщают о ходе постоянно. Если такой этап давно не обновлялся,
+  // его прервали (перезапуск расширения или браузера, закрытая вкладка) — он больше не идёт.
+  const STALE_MS = 10 * 60 * 1000;
+  const isActive = (s) => !!s && ACTIVE.has(s.phase) &&
+    (!["collect", "sync", "download"].includes(s.phase) || Date.now() - (s.at || 0) < STALE_MS);
 
   const isPinterestHost = (host) => /(^|\.)pinterest\.[a-z.]+$/.test(host);
 
@@ -39,5 +44,5 @@ self.PBD = (() => {
     return trim(s.slice(0, limit)) || "untitled";
   }
 
-  return { RESERVED, ACTIVE, isPinterestHost, pathParts, isBoardPath, isProfilePath, boardKey, safeName };
+  return { RESERVED, ACTIVE, isActive, isPinterestHost, pathParts, isBoardPath, isProfilePath, boardKey, safeName };
 })();

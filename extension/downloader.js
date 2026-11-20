@@ -1,7 +1,7 @@
 // Страница загрузки: пишет файлы досок прямо в выбранную папку
 // (без окна «Сохранить как» на каждый файл).
 
-const PARALLEL = 4;
+const PARALLEL = 6; // файлов доски одновременно: картинки отдаёт pinimg.com, он такую нагрузку держит
 // найдено меньше этой доли пинов доски — считаем, что Pinterest показал не все, и ничего не убираем
 const PARTIAL_SHARE = 0.8;
 const FILE_OPS_PARALLEL = 8; // одновременных переименований и переносов при сверке
@@ -126,35 +126,56 @@ const GALLERY_DIR = "_галерея"; // index.html, pins.json и board.json
 // Пояснения внутри служебных папок: что это за папка и откуда в ней файлы.
 // В начале — метка UTF-8 (BOM), чтобы старый Блокнот Windows не показал кириллицу кракозябрами.
 const README_TXT = "readme.txt";
-const GALLERY_README = `Папка «${GALLERY_DIR}» — служебная, её создаёт расширение Pinterest Board Downloader.
+const GALLERY_README = `ПАПКА «${GALLERY_DIR}»
 
-index.html — просмотр доски в браузере так же, как на сайте, вместе с видео. Откройте его двойным щелчком.
-  Картинки он берёт из папки доски по именам файлов, поэтому не переименовывайте и не перемещайте их вручную.
-pins.json — список пинов доски по порядку: номер, id пина, название, ссылка и имена файлов.
-board.json — ссылка на доску на Pinterest. По ней доска видна в списке «Мои доски» во вкладке загрузок
-  и обновляется кнопкой «Обновить».
+Служебная папка расширения Pinterest Board Downloader. Она обновляется при каждом скачивании доски.
 
-Эти файлы переписываются при каждом скачивании доски. Если папку удалить, ничего не сломается:
-при следующем скачивании она появится снова, но до тех пор доски не будет в списке «Мои доски».
+
+ЧТО ВНУТРИ
+
+  index.html   Доска сеткой, как на Pinterest, вместе с видео.
+               Откройте двойным щелчком — она откроется в браузере, интернет не нужен.
+
+  pins.json    Список пинов по порядку: номер, id, название, ссылка на пин и имена файлов.
+
+  board.json   Ссылка на доску. По ней доска видна во вкладке «Мои доски» и обновляется кнопкой «Обновить».
+
+
+ВАЖНО
+
+  - Не переименовывайте и не перемещайте файлы доски. По номеру и id в имени файла расширение узнаёт
+    уже скачанные пины, а index.html находит по имени картинки.
+  - Эту папку можно удалить: при следующем скачивании доски она появится снова.
+    До тех пор доски не будет в списке «Мои доски».
 `;
-const REMOVED_README = `Папка «${REMOVED_DIR}» — сюда расширение Pinterest Board Downloader переносит файлы,
-которые больше не нужны в папке доски. Само оно отсюда ничего не удаляет: что делать с этими файлами, решаете вы.
+const REMOVED_README = `ПАПКА «${REMOVED_DIR}»
 
-Как сюда попадают файлы
-- Пин убрали с доски (вы сами или его удалил автор). При следующем скачивании доски его файл переносится сюда.
-- У одного пина в папке доски оказалось несколько разных файлов. На месте остаётся файл с правильным номером,
-  а лишний переносится сюда. Точные копии расширение удаляет само и сюда не кладёт.
+Сюда расширение Pinterest Board Downloader переносит файлы, которых больше нет на доске.
+Само оно отсюда ничего не удаляет: что делать с этими файлами, решаете вы.
+Папка создаётся вместе с доской, поэтому может быть пустой — это нормально.
 
-Почему здесь может оказаться пин, который на доске есть
-- Это лишняя копия файла. Такие копии появлялись в версиях до 1.4.0 из-за ошибок при обновлении доски,
-  например когда доску одновременно сверяли несколько вкладок загрузок. Сам пин при этом лежит в папке доски
-  под своим нынешним номером: найдите файл с тем же id — это длинное число после номера в имени файла.
-  Копию отсюда можно удалить.
-- Pinterest показал не все пины доски: вы не вошли в аккаунт, мешал VPN или сайт отвечал с ошибками.
-  Тогда расширение сочло часть пинов убранными. Войдите в аккаунт и скачайте доску ещё раз:
-  такие пины скачаются заново, а файлы отсюда можно будет удалить.
 
-Имя файла: <номер на доске на момент переноса>_<id пина>. Пин на Pinterest: https://www.pinterest.com/pin/<id пина>/
+КАК СЮДА ПОПАДАЮТ ФАЙЛЫ
+
+  - Пин убрали с доски — вы сами или его удалил автор.
+    При следующем скачивании доски его файл переезжает сюда.
+  - У одного пина в папке доски оказалось несколько разных файлов.
+    Остаётся файл с правильным номером, лишний переезжает сюда. Точные копии расширение удаляет само.
+
+
+ЕСЛИ ЗДЕСЬ ПИН, КОТОРЫЙ НА ДОСКЕ ЕСТЬ
+
+  - Скорее всего, это лишняя копия. Такие появлялись в версиях до 1.4.0 из-за ошибок при обновлении доски.
+    Сам пин лежит в папке доски под своим номером — найдите файл с тем же id. Копию можно удалить.
+  - Или Pinterest тогда показал не все пины: вы не вошли в аккаунт или мешал VPN.
+    Начиная с версии 1.4.1 в таком случае файлы остаются на месте.
+    Войдите в аккаунт и скачайте доску ещё раз — недостающие пины скачаются заново.
+
+
+КАК УЗНАТЬ, ЧТО ЭТО ЗА ПИН
+
+  Имя файла:          <номер на доске в момент переноса>_<id пина>.jpg
+  Пин на Pinterest:   https://www.pinterest.com/pin/<id пина>/
 `;
 const writeReadme = (dir, text) => writeText(dir, README_TXT, "\uFEFF" + text.replace(/\n/g, "\r\n"));
 const NUM = /^\d+_/;           // номер позиции в начале имени файла
@@ -702,6 +723,7 @@ async function downloadBoard(board, view) {
     }
     const gallery = await dir.getDirectoryHandle(GALLERY_DIR, { create: true });
     await writeReadme(gallery, GALLERY_README);
+    await writeReadme(await dir.getDirectoryHandle(REMOVED_DIR, { create: true }), REMOVED_README);
     await writeText(gallery, "index.html", indexHtml(folder));
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
@@ -921,10 +943,16 @@ function waitFilled(key, job) {
   });
 }
 
-function prefetchNext(pending, afterKey) {
-  const i = pending.findIndex((p) => p.key === afterKey);
-  const next = pending.slice(i + 1).find((p) => !p.data && p.link && !seen.has(p.key));
-  if (next) startCollecting(next);
+// Пока качается доска, пины PREFETCH ближайших досок очереди собираются заранее. Не больше:
+// сбор — это сотни запросов к Pinterest (на частые он отвечает «подождите»), а собранные
+// пины всей длинной очереди заняли бы много места и успели бы устареть.
+const PREFETCH = 2;
+async function prefetch() {
+  if (!ownQueue || !currentCtrl) return; // только пока эта вкладка качает доску
+  const { pending = [] } = await chrome.storage.local.get("pending");
+  for (const p of pending.filter((x) => !seen.has(x.key)).slice(0, PREFETCH)) {
+    if (!p.data && p.link && !collecting.has(p.key)) startCollecting(p);
+  }
 }
 
 // Доски и пины, которые ждут своей очереди: пронумерованы в порядке скачивания,
@@ -1170,7 +1198,9 @@ async function processQueue() {
         view.finish("Не удалось собрать пины", "failed");
         view.error(`${item.link} — ${res}`);
         finished.push({ data: { title: item.title }, error: res });
-        await chrome.runtime.sendMessage({ type: "taken", key: item.key });
+        await setJob(item.job, { phase: "error", text: res });
+        // если сбор всё же закончится позже, его итог не нужен — иначе доска встанет в очередь второй раз
+        await chrome.runtime.sendMessage({ type: "taken", key: item.key, dropped: true });
         continue;
       }
       const now = (await chrome.storage.local.get("pending")).pending || [];
@@ -1185,11 +1215,11 @@ async function processQueue() {
     }
     currentKey = item.key;
     renderQueue();
-    prefetchNext(pending, item.key);
 
     const ctrl = new AbortController();
     currentCtrl = ctrl;
     activeSignal = ctrl.signal;
+    prefetch();
     const view = reportingView(boardView(item.data, () => ctrl.abort()), item.job);
     try {
       const r = await downloadBoard(item.data, view);
@@ -1224,6 +1254,7 @@ chrome.storage.onChanged.addListener((ch, area) => {
   if (area === "local" && ch.pending) {
     renderQueue();
     run();
+    prefetch(); // у одной из досок собрались пины — можно начать следующую
   }
 });
 $("pick").addEventListener("click", pickFolder);
@@ -1362,6 +1393,15 @@ $("updGo").addEventListener("click", async () => {
 });
 
 $("updClose").addEventListener("click", () => { $("upd").hidden = true; });
+
+// Перезапуск расширения — когда что-то зависло. Вкладка загрузок закроется вместе с ним,
+// поэтому фоновый скрипт после перезапуска откроет её снова (флаг reopenDownloader).
+$("reloadExt").addEventListener("click", async (e) => {
+  e.preventDefault();
+  if (currentKey && !confirm("Сейчас идёт загрузка. Она прервётся, а после перезапуска продолжится с того же места: уже скачанные файлы пропустятся. Перезапустить?")) return;
+  await chrome.storage.local.set({ reopenDownloader: true });
+  chrome.runtime.reload();
+});
 
 $("updCheck").addEventListener("click", async (e) => {
   e.preventDefault();

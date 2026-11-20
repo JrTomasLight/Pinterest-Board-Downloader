@@ -2,7 +2,7 @@
 // и список «Мои доски» — скачанные доски в выбранной папке с кнопками «Обновить».
 // Пользуется общим из downloader.js: $, root, ensureRoot, hasPermission, GALLERY_DIR, BOARD_INFO, readJson, writeText.
 
-const { ACTIVE: ACTIVE_PHASES, boardKey: boardKeyOf, safeName: folderNameOf } = PBD;
+const { isActive, boardKey: boardKeyOf, safeName: folderNameOf } = PBD;
 const SINGLES_DIR = "Отдельные пины";
 const openedAt = Date.now();
 
@@ -389,7 +389,7 @@ function libraryRow(b, state) {
   row.append(btn);
 
   const paint = (s) => {
-    const fresh = s && (ACTIVE_PHASES.has(s.phase) || (s.at || 0) >= openedAt);
+    const fresh = s && (isActive(s) || (!PBD.ACTIVE.has(s.phase) && (s.at || 0) >= openedAt));
     const label = fresh ? jobLabel(s) : null;
     if (!b.url) {
       st.textContent = b.resolving ? "Ищу эту доску на Pinterest…"
@@ -400,7 +400,7 @@ function libraryRow(b, state) {
     }
     st.textContent = label ? label.text : "";
     st.className = "lib-st" + (label && label.tone ? " " + label.tone : "");
-    btn.disabled = !!(s && ACTIVE_PHASES.has(s.phase));
+    btn.disabled = isActive(s);
   };
   paint(state);
   if (b.key) rowsByKey.set(b.key, paint);
