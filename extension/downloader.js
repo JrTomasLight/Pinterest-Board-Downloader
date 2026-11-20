@@ -1,7 +1,7 @@
 // Страница загрузки: пишет файлы досок прямо в выбранную папку
 // (без окна «Сохранить как» на каждый файл).
 
-const PARALLEL = 6; // файлов доски одновременно: картинки отдаёт pinimg.com, он такую нагрузку держит
+// Сколько файлов доски качать одновременно — в настройках (по умолчанию 6: pinimg.com такую нагрузку держит).
 // найдено меньше этой доли пинов доски — считаем, что Pinterest показал не все, и ничего не убираем
 const PARTIAL_SHARE = 0.8;
 const FILE_OPS_PARALLEL = 8; // одновременных переименований и переносов при сверке
@@ -18,6 +18,14 @@ async function pool(items, limit, fn) {
   await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker));
 }
 const $ = (id) => document.getElementById(id);
+
+// Настройки со вкладки «Настройки». Доска берёт их, когда начинает качаться.
+let settings = { ...PBD.DEFAULTS };
+PBD.getSettings().then((s) => { settings = s; });
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area === "local" && ch.settings) settings = { ...PBD.DEFAULTS, ...(ch.settings.newValue || {}) };
+});
+PBD.watchTheme();
 
 // ------------------------------------------------------------ версия и ссылки
 const REPO = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
@@ -135,6 +143,7 @@ const GALLERY_README = `ПАПКА «${GALLERY_DIR}»
 
   index.html   Доска сеткой, как на Pinterest, вместе с видео.
                Откройте двойным щелчком — она откроется в браузере, интернет не нужен.
+               Если галерея выключена в настройках расширения, этого файла нет.
 
   pins.json    Список пинов по порядку: номер, id, название, ссылка на пин и имена файлов.
 
@@ -143,7 +152,7 @@ const GALLERY_README = `ПАПКА «${GALLERY_DIR}»
 
 ВАЖНО
 
-  - Не переименовывайте и не перемещайте файлы доски. По номеру и id в имени файла расширение узнаёт
+  - Не переименовывайте и не перемещайте файлы доски. По id в имени файла расширение узнаёт
     уже скачанные пины, а index.html находит по имени картинки.
   - Эту папку можно удалить: при следующем скачивании доски она появится снова.
     До тех пор доски не будет в списке «Мои доски».
@@ -175,25 +184,47 @@ const REMOVED_README = `ПАПКА «${REMOVED_DIR}»
 КАК УЗНАТЬ, ЧТО ЭТО ЗА ПИН
 
   Имя файла:          <номер на доске в момент переноса>_<id пина>.jpg
+                      (или просто <id пина>.jpg, если нумерация выключена в настройках)
   Пин на Pinterest:   https://www.pinterest.com/pin/<id пина>/
 `;
 const writeReadme = (dir, text) => writeText(dir, README_TXT, "\uFEFF" + text.replace(/\n/g, "\r\n"));
-const NUM = /^\d+_/;           // номер позиции в начале имени файла
-const restOf = (stem) => stem.replace(NUM, ""); // id пина (+ _01 для карусели) без номера
+const restOf = (stem) => stem.replace(/^\d+_/, ""); // id пина (+ _01 для карусели) без номера позиции
+const VIDEO_EXT = /\.(mp4|ts)$/i;
 
-// Файлы пинов в папке, сгруппированные по id пина (без номера позиции):
-// так скачанный пин узнаётся, даже если на доске он сдвинулся.
+// Ключ пина по имени файла — id пина (+ _01 для карусели), с номером позиции в начале или без него
+// (настройка «Нумерация файлов»): 0001_<id>, 0001_<id>_01, <id>, <id>_01. У других файлов — null.
+// Без номера id должен быть длинным, чтобы не принять за пин, например, 20240512.jpg.
+function pinKey(stem) {
+  const p = stem.split("_");
+  if (!p.every((x) => /^\d+$/.test(x))) return null;
+  if (p.length === 3) return p[2].length === 2 ? `${p[1]}_${p[2]}` : null;
+  if (p.length === 2) return p[1].length !== 2 ? p[1] : p[0].length >= 9 ? stem : null;
+  return p.length === 1 && p[0].length >= 9 ? stem : null;
+}
+
+// Файлы пинов в папке, сгруппированные по ключу пина: так скачанный пин узнаётся,
+// даже если на доске он сдвинулся, а номер в имени поменялся или пропал.
 async function existingPinFiles(dir, step) {
-  const map = new Map(); // id -> [имена файлов]
+  const map = new Map(); // ключ -> [имена файлов]
   let seenFiles = 0;
   for await (const [name, h] of dir.entries()) {
     if (++seenFiles % 200 === 0) step(`Сверяю с уже скачанным… просмотрено файлов: ${seenFiles}`);
-    if (h.kind !== "file" || name.endsWith(".crswap") || !NUM.test(name)) continue;
-    const rest = restOf(name.replace(/\.[^.]+$/, ""));
-    if (!map.has(rest)) map.set(rest, []);
-    map.get(rest).push(name);
+    if (h.kind !== "file" || name.endsWith(".crswap")) continue;
+    const key = pinKey(name.replace(/\.[^.]+$/, ""));
+    if (!key) continue;
+    if (!map.has(key)) map.set(key, []);
+    map.get(key).push(name);
   }
   return map;
+}
+
+async function hasDir(parent, name) {
+  try {
+    await parent.getDirectoryHandle(name);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 // Переименование/перенос файла. move() есть не во всех версиях браузера — тогда копируем.
@@ -248,7 +279,9 @@ async function renumberSections(rootFolder, step = () => {}) {
   let moved = 0;
   for (const s of rootFolder.subfolders) {
     if (dirs.includes(s.dir)) continue;
-    const old = dirs.find((d) => !wanted.has(d) && /^\d+ /.test(d) && title(d) === title(s.dir));
+    // s.alt — то же название с другой заменой спецсимволов (поменяли настройку)
+    const old = dirs.find((d) => !wanted.has(d) && /^\d+ /.test(d) &&
+      (title(d) === title(s.dir) || (s.alt && title(d) === title(s.alt))));
     if (!old) continue;
     step(`Переименовываю папку раздела «${old}» → «${s.dir}»…`);
     await moveDir(rootDir, old, s.dir);
@@ -287,43 +320,81 @@ async function syncSingles(folder, dir, stats) {
   return jobs;
 }
 
-// keepMissing — Pinterest показал не все пины доски: файлы пинов, которых нет в списке, оставляем на месте,
-// а не переносим в «_убраны с доски» (скорее всего, они с доски никуда не делись)
-async function syncFolder(folder, dir, stats, step = () => {}, keepMissing = false) {
-  if (folder.single) return syncSingles(folder, dir, stats);
-  const have = await existingPinFiles(dir, step);
-  const jobs = [];
-  let removedDir = null;
-  const openRemoved = async () => {
-    if (!removedDir) {
-      removedDir = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
-      await writeReadme(removedDir, REMOVED_README);
-    }
-    return removedDir;
-  };
-  const putAway = async (name) => {
-    await moveFile(dir, name, await openRemoved(), name);
-    stats.removed++;
-  };
+// Сверяет папки доски с текущей доской и возвращает список того, что нужно скачать.
+// Файлы пина ищутся во всех папках доски: в корне и в папках разделов (если качается вся доска,
+// то и в папках прежних разделов). Так пин, перешедший в другой раздел, и файлы после смены настроек
+// «Разделы доски» и «Нумерация файлов» переезжают и переименовываются, а не скачиваются заново.
+// Файлы пинов, которых на доске больше нет, уходят в «_убраны с доски» той папки, где лежали.
+// keepMissing — Pinterest показал не все пины доски: такие файлы оставляем на месте
+// (скорее всего, пины с доски никуда не делись).
+async function syncBoard(board, stats, step = () => {}, keepMissing = false) {
+  const folders = board.folders.filter((f) => !f.skip);
+  if (!folders.length) return [];
+  if (folders[0].single) return syncSingles(folders[0], await getDir(folders[0].path), stats);
 
-  const renames = [];
-  for (const pin of folder.pins) {
-    pin.files = pin.media.map(() => null);
-    pin.media.forEach((m, k) => {
-      stats.total++;
-      const names = have.get(restOf(m.stem));
-      if (!names) {
-        jobs.push({ dir, pin, k, m });
-        return;
-      }
-      have.delete(restOf(m.stem));
-      const keep = names.find((n) => n.startsWith(m.stem + ".")) || names[0];
-      const target = m.stem + keep.slice(keep.lastIndexOf("."));
-      renames.push({ keep, target, extra: names.filter((n) => n !== keep) });
-      pin.files[k] = target;
-      stats.done++;
-    });
+  const places = new Map(); // путь -> папка
+  for (const f of folders) places.set(f.path, await getDir(f.path));
+  if (!board.folders[0].skip) {
+    const rootDir = await getDir(board.root);
+    for await (const [name, h] of rootDir.entries()) {
+      const path = `${board.root}/${name}`;
+      if (h.kind === "directory" && /^\d+ /.test(name) && !places.has(path)) places.set(path, h);
+    }
   }
+  board.leftovers = [...places.keys()].filter((p) => !folders.some((f) => f.path === p));
+
+  const have = new Map(); // ключ пина -> [{ dir, name }]
+  for (const dir of places.values()) {
+    for (const [key, names] of await existingPinFiles(dir, step)) {
+      if (!have.has(key)) have.set(key, []);
+      for (const name of names) have.get(key).push({ dir, name });
+    }
+  }
+
+  const jobs = [];
+  const renames = [];
+  for (const folder of folders) {
+    const dir = places.get(folder.path);
+    for (const pin of folder.pins) {
+      pin.files = pin.media.map(() => null);
+      pin.media.forEach((m, k) => {
+        const key = m.key || restOf(m.stem);
+        const found = have.get(key);
+        have.delete(key);
+        if (m.skip && !found) return; // видео не качаются (настройка «Видео»)
+        stats.total++;
+        if (!found) {
+          jobs.push({ dir, pin, k, m });
+          return;
+        }
+        const here = found.filter((f) => f.dir === dir);
+        const keep = here.find((f) => f.name.startsWith(m.stem + ".")) || here[0] || found[0];
+        const ext = keep.name.slice(keep.name.lastIndexOf("."));
+        // раньше вместо видео сохранили обложку, а теперь нужно видео: качаем, обложку потом удаляем
+        if ((m.kind === "video" || m.kind === "hls") && !VIDEO_EXT.test(ext)) {
+          jobs.push({ dir, pin, k, m, replace: found });
+          return;
+        }
+        const target = m.stem + ext;
+        renames.push({ keep, dir, target, extra: found.filter((f) => f !== keep) });
+        pin.files[k] = target;
+        stats.done++;
+      });
+    }
+  }
+
+  // своя «_убраны с доски» у каждой папки; создаётся один раз, даже если в неё переносят сразу несколько файлов
+  const removedDirs = new Map();
+  const openRemoved = (dir) => {
+    if (!removedDirs.has(dir)) {
+      removedDirs.set(dir, (async () => {
+        const d = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
+        await writeReadme(d, REMOVED_README);
+        return d;
+      })());
+    }
+    return removedDirs.get(dir);
+  };
 
   // Каждый перенос и переименование виден в прогрессе — на большой доске их могут быть тысячи.
   // Делаем их по несколько сразу: файлы разных пинов друг другу не мешают.
@@ -332,12 +403,12 @@ async function syncFolder(folder, dir, stats, step = () => {}, keepMissing = fal
   const missing = [...have.values()].flat();
   const away = keepMissing ? [] : missing;
   if (keepMissing) stats.kept += missing.length;
-  const sizeOf = async (name) => (await (await dir.getFileHandle(name)).getFile()).size;
+  const sizeOf = async (f) => (await (await f.dir.getFileHandle(f.name)).getFile()).size;
   await pool(renames.filter((r) => r.extra.length), FILE_OPS_PARALLEL, async (r) => {
     const keepSize = await sizeOf(r.keep);
     for (const extra of r.extra) {
       if ((await sizeOf(extra)) === keepSize) {
-        await dir.removeEntry(extra);
+        await extra.dir.removeEntry(extra.name);
         stats.dupes++;
       } else {
         away.push(extra);
@@ -345,21 +416,37 @@ async function syncFolder(folder, dir, stats, step = () => {}, keepMissing = fal
     }
     step(`Убираю повторяющиеся файлы пинов: удалено ${stats.dupes}`);
   });
-  if (away.length) await openRemoved(); // до параллельных переносов, чтобы папка создалась один раз
   let n = 0;
-  await pool(away, FILE_OPS_PARALLEL, async (name) => {
-    await putAway(name);
+  await pool(away, FILE_OPS_PARALLEL, async (f) => {
+    await moveFile(f.dir, f.name, await openRemoved(f.dir), f.name);
+    stats.removed++;
     step(`Убираю файлы пинов, которых больше нет на доске: ${++n} из ${away.length}`);
   });
   // в имени есть id пина, поэтому новое имя не может быть занято другим пином
-  const moves = renames.filter((r) => r.keep !== r.target);
+  const moves = renames.filter((r) => r.keep.dir !== r.dir || r.keep.name !== r.target);
   let m = 0;
   await pool(moves, FILE_OPS_PARALLEL, async (r) => {
-    await moveFile(dir, r.keep, dir, r.target);
+    await moveFile(r.keep.dir, r.keep.name, r.dir, r.target);
     stats.renamed++;
-    step(`Перенумеровываю файлы: ${++m} из ${moves.length}`);
+    step(`Переименовываю и переношу файлы: ${++m} из ${moves.length}`);
   });
   return jobs;
+}
+
+// Папка прежнего раздела, из которой всё разъехалось по другим папкам: если в ней остались только
+// служебные файлы расширения, она больше не нужна. Всё остальное (ваши файлы, убранные пины) не трогаем.
+async function removeLeftover(path) {
+  const i = path.lastIndexOf("/");
+  const parent = await getDir(path.slice(0, i));
+  const name = path.slice(i + 1);
+  const dir = await parent.getDirectoryHandle(name);
+  const service = { [GALLERY_DIR]: [README_TXT, "index.html", "pins.json", BOARD_INFO], [REMOVED_DIR]: [README_TXT] };
+  for await (const [n, h] of dir.entries()) {
+    if (h.kind === "file" || !service[n]) return;
+    for await (const [n2, h2] of h.entries()) if (h2.kind !== "file" || !service[n].includes(n2)) return;
+  }
+  await parent.removeEntry(name, { recursive: true });
+  dirCache.delete(path);
 }
 
 // Без ограничений по времени один зависший ответ сервера останавливает всю очередь.
@@ -488,7 +575,9 @@ function extOf(url, kind) {
   return m ? "." + m[1] : kind === "image" ? ".jpg" : ".mp4";
 }
 
-async function saveHls(dir, stem, url) {
+async function saveHls(dir, m) {
+  const stem = m.stem;
+  let url = m.url;
   const base = url.split("?")[0];
   for (const guess of [
     base.replace("/hls/", "/expMp4/").replace(".m3u8", "_720w.mp4"),
@@ -499,8 +588,15 @@ async function saveHls(dir, stem, url) {
       return stem + ".mp4";
     }
   }
+  // склейка в .ts выключена в настройках — сохраняем обложку видео
+  if (m.noTs) {
+    if (!m.cover) throw new Error("у видео есть только поток HLS, а склейка в .ts выключена в настройках");
+    const name = stem + extOf(m.cover, "image");
+    await writeResponse(dir, name, await get(m.cover));
+    return name;
+  }
   // запасной вариант — склеиваем поток в .ts (открывается в VLC и большинстве плееров)
-  const text = async (u) => (await readAll(await get(u))).text();
+  const text =async (u) => (await readAll(await get(u))).text();
   let playlist = await text(url);
   if (playlist.includes("#EXT-X-STREAM-INF")) {
     let best = null, bw = -1;
@@ -531,7 +627,7 @@ async function saveHls(dir, stem, url) {
 }
 
 async function saveMedia(dir, m) {
-  if (m.kind === "hls") return saveHls(dir, m.stem, m.url);
+  if (m.kind === "hls") return saveHls(dir, m);
   let resp;
   try {
     resp = await get(m.url);
@@ -659,14 +755,87 @@ function boardView(board, onCancel) {
   };
 }
 
+// Применяет настройки к собранной доске (копии: строка очереди остаётся как была).
+// Решается здесь, а не при сборе пинов: доску могли собрать заранее, а настройки поменять потом.
+function applySettings(board, s) {
+  board = structuredClone(board);
+  const folders = board.folders;
+  const video = (m) => {
+    if (m.kind !== "video" && m.kind !== "hls") return;
+    if (s.video === "skip") m.skip = true;
+    else if (s.video === "cover" && m.cover) Object.assign(m, { kind: "image", url: m.cover });
+    else if (m.kind === "hls" && !s.hlsTs) m.noTs = true;
+  };
+  if (!folders[0] || folders[0].single) {
+    for (const pin of folders[0] ? folders[0].pins : []) {
+      for (const m of pin.media) {
+        if (s.prettyNames && m.stemPretty) m.stem = m.stemPretty;
+        video(m);
+      }
+    }
+    return board;
+  }
+
+  // имена папок: запрещённые символы на «_» или на похожие; alt — другой вариант, чтобы найти и
+  // переименовать папку, скачанную до смены настройки
+  const pick = (plain, pretty) => (s.prettyNames && pretty ? pretty : plain);
+  const rootName = pick(board.root, board.rootPretty);
+  board.rootAlt = rootName === board.root ? board.rootPretty : board.root;
+  board.root = rootName;
+  for (const sf of folders[0].subfolders) {
+    const d = pick(sf.dir, sf.dirPretty);
+    sf.alt = d === sf.dir ? sf.dirPretty : sf.dir;
+    sf.dir = d;
+  }
+  folders.forEach((f, i) => {
+    if (i === 0) f.path = rootName;
+    else if (f.dir) f.path = `${rootName}/${pick(f.dir, f.dirPretty)}`;
+  });
+
+  // разделы одной папкой: сначала пины разделов, потом остальные — как на странице доски,
+  // и сплошная нумерация. Если скачивается один раздел, он, как обычно, в своей папке.
+  if (s.sections === "flat" && !board.section && folders.length > 1) {
+    const all = [...folders.slice(1), folders[0]].flatMap((f) => f.pins);
+    const width = Math.max(4, String(all.length).length);
+    all.forEach((pin, i) => {
+      pin.n = i + 1;
+      for (const m of pin.media) m.stem = `${String(i + 1).padStart(width, "0")}_${restOf(m.stem)}`;
+    });
+    folders[0].pins = all;
+    folders[0].subfolders = [];
+    board.folders = [folders[0]];
+  }
+
+  for (const f of board.folders) {
+    for (const pin of f.pins) {
+      for (const m of pin.media) {
+        m.key = restOf(m.stem);
+        if (!s.numbering) m.stem = m.key;
+        video(m);
+      }
+    }
+  }
+  return board;
+}
+
+// Название папки доски поменялось только из-за настройки «Спецсимволы в именах» — переименовываем
+// прежнюю папку, а не качаем доску заново рядом.
+async function renameRoot(board, step) {
+  if (!board.rootAlt || board.rootAlt === board.root) return;
+  if ((await hasDir(root, board.root)) || !(await hasDir(root, board.rootAlt))) return;
+  step(`Переименовываю папку «${board.rootAlt}» → «${board.root}»…`);
+  await moveDir(root, board.rootAlt, board.root);
+}
+
 async function downloadBoard(board, view) {
+  const s = settings;
+  board = applySettings(board, s);
   const signal = activeSignal || new AbortController().signal;
   view.status("Сверяю с уже скачанным…");
   dirCache.clear(); // папки разделов могли переименоваться
   const stats = { total: 0, done: 0, renamed: 0, removed: 0, dupes: 0, kept: 0 };
   // Pinterest отдал заметно меньше пинов, чем на доске (не вошли в аккаунт, мешал VPN, сбой сайта)
   const partial = !!(board.expected && board.found < board.expected * PARTIAL_SHARE);
-  const jobs = [];
   // сверка большой доски может идти долго — показываем каждый шаг, а не одну надпись
   let lastStep = 0;
   const step = (text) => {
@@ -676,18 +845,16 @@ async function downloadBoard(board, view) {
     lastStep = now;
     view.status(text);
   };
+  await renameRoot(board, step);
+  dirCache.clear();
   await renumberSections(board.folders[0], step);
-  for (const folder of board.folders) {
-    if (folder.skip) continue; // скачивается один раздел — корень доски не трогаем
-    checkCancel();
-    if (board.folders.length > 1) view.status(`Сверяю с уже скачанным: «${folder.title}»…`);
-    jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats, step, partial)));
-  }
+  checkCancel();
+  const jobs = await syncBoard(board, stats, step, partial);
   const total = stats.total;
   let done = stats.done, failed = 0;
   const notes = [];
   if (stats.done) notes.push(`уже было: ${stats.done}`);
-  if (stats.renamed) notes.push(`перенумеровано: ${stats.renamed}`);
+  if (stats.renamed) notes.push(`переименовано и перенесено: ${stats.renamed}`);
   if (stats.removed) notes.push(`убрано в «${REMOVED_DIR}»: ${stats.removed}`);
   if (stats.dupes) notes.push(`удалено одинаковых копий: ${stats.dupes}`);
   if (stats.kept) notes.push(`оставлено на месте (Pinterest показал не все пины): ${stats.kept}`);
@@ -700,8 +867,13 @@ async function downloadBoard(board, view) {
     while (next < jobs.length && !signal.aborted) {
       const j = jobs[next++];
       try {
-        j.pin.files[j.k] = await saveWithRetry(j.dir, j.m);
+        const name = await saveWithRetry(j.dir, j.m);
+        j.pin.files[j.k] = name;
         done++;
+        // видео вместо прежней обложки: обложка больше не нужна
+        for (const f of j.replace || []) {
+          if (f.dir !== j.dir || f.name !== name) await f.dir.removeEntry(f.name).catch(() => {});
+        }
       } catch (e) {
         if (signal.aborted) return; // отмена — не ошибка
         failed++;
@@ -710,10 +882,14 @@ async function downloadBoard(board, view) {
       view.update(done, total, failed);
     }
   }
-  await Promise.all(Array.from({ length: PARALLEL }, worker));
+  const parallel = Math.min(10, Math.max(1, Math.round(+s.parallel) || PBD.DEFAULTS.parallel));
+  await Promise.all(Array.from({ length: parallel }, worker));
   checkCancel();
   view.status("Пишу галерею…");
 
+  for (const path of board.leftovers || []) {
+    try { await removeLeftover(path); } catch { /* остаётся как есть */ }
+  }
   for (const folder of board.folders) {
     if (folder.single || folder.skip) continue; // для отдельных пинов галерея не нужна
     const dir = await getDir(folder.path);
@@ -724,7 +900,8 @@ async function downloadBoard(board, view) {
     const gallery = await dir.getDirectoryHandle(GALLERY_DIR, { create: true });
     await writeReadme(gallery, GALLERY_README);
     await writeReadme(await dir.getDirectoryHandle(REMOVED_DIR, { create: true }), REMOVED_README);
-    await writeText(gallery, "index.html", indexHtml(folder));
+    if (s.gallery) await writeText(gallery, "index.html", indexHtml(folder));
+    else await gallery.removeEntry("index.html").catch(() => {}); // галерея выключена в настройках
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
   }
@@ -802,7 +979,7 @@ function reportingView(view, job) {
 // Если вкладка загрузок в фоне, о конце каждой доски или пина сообщаем системным уведомлением.
 const NOTE_ID = "pinboard-done";
 function notify(title, message) {
-  if (!document.hidden || !chrome.notifications) return;
+  if (!settings.notify || !document.hidden || !chrome.notifications) return;
   try { // уведомление — не главное: если не вышло, загрузка всё равно считается удачной
     chrome.notifications.clear(NOTE_ID); // новое заменяет прежнее, а не копится стопкой
     chrome.notifications.create(NOTE_ID, {

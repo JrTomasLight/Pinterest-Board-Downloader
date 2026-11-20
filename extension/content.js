@@ -106,11 +106,14 @@
     return best;
   }
 
-  function videoMedia(list) {
+  // cover — обложка видео: её сохраняют вместо видео, если так выбрано в настройках
+  function videoMedia(list, cover) {
+    const vals = Object.values(list || {});
+    cover = cover || (vals.find((v) => v && v.thumbnail) || {}).thumbnail || null;
     const mp4 = bestMp4(list);
-    if (mp4) return { kind: "video", url: mp4 };
-    for (const v of Object.values(list || {})) {
-      if (v && v.url && v.url.includes(".m3u8")) return { kind: "hls", url: v.url };
+    if (mp4) return { kind: "video", url: mp4, cover };
+    for (const v of vals) {
+      if (v && v.url && v.url.includes(".m3u8")) return { kind: "hls", url: v.url, cover };
     }
     return null;
   }
@@ -142,7 +145,7 @@
     }
     if (out.length) return out;
 
-    const vm = videoMedia(pin.videos && pin.videos.video_list);
+    const vm = videoMedia(pin.videos && pin.videos.video_list, imageUrl(pin.images));
     if (vm) return [vm];
     const img = imageUrl(pin.images);
     return img ? [{ kind: "image", url: img }] : [];
@@ -229,7 +232,10 @@
       { username: b.user, slug: b.slug, field_set_key: "detailed" }, src, retryNote("Доска", progress))).data;
     if (!board || !board.id) throw new Error("Доска не найдена.");
 
+    // Имена папок — в двух вариантах (запрещённые символы на «_» и на похожие): какой взять,
+    // решает вкладка загрузок по настройкам, когда до доски дойдёт черёд.
     const rootName = safeName(`${b.user} - ${board.name || b.slug}`);
+    const rootPretty = safeName(`${b.user} - ${board.name || b.slug}`, 80, true);
     const rootPath = rootName;
     progress(`Доска «${board.name}»: ${board.pin_count} пинов…`);
 
@@ -240,7 +246,9 @@
     // номер папки раздела — его место на доске, даже если скачивается один раздел
     const width = String(sections.length).length;
     sections.forEach((s, i) => {
-      s._dir = `${String(i + 1).padStart(width, "0")} ${safeName(s.title || s.slug || s.id)}`;
+      const num = String(i + 1).padStart(width, "0");
+      s._dir = `${num} ${safeName(s.title || s.slug || s.id)}`;
+      s._dirPretty = `${num} ${safeName(s.title || s.slug || s.id, 80, true)}`;
     });
     if (b.section) {
       sections = sections.filter((s) => s.slug === b.section);
@@ -259,8 +267,11 @@
         paginate("BoardSectionPinsResource", { section_id: s.id, page_size: 25 }, src, retryNote(label, progress)),
         src, label, progress);
       found += pins.length;
-      folders.push(toFolder(`${rootPath}/${dir}`, `${board.name} / ${s.title}`, pins));
-      subfolders.push({ name: s.title || dir, dir });
+      const f = toFolder(`${rootPath}/${dir}`, `${board.name} / ${s.title}`, pins);
+      f.dir = dir;
+      f.dirPretty = s._dirPretty;
+      folders.push(f);
+      subfolders.push({ name: s.title || dir, dir, dirPretty: s._dirPretty });
     }
 
     let rootPins = [];
@@ -282,7 +293,7 @@
     const gated = expected && found < expected * 0.8 && found <= 30;
     const url = `https://www.pinterest.com${src}` + (b.section ? `${encodeURIComponent(b.section)}/` : "");
     return {
-      id: board.id, title: board.name || b.slug, root: rootPath, folders, found, expected, gated,
+      id: board.id, title: board.name || b.slug, root: rootPath, rootPretty, folders, found, expected, gated,
       url, user: b.user, section: b.section || null,
     };
   }
@@ -332,12 +343,14 @@
         const title = pin.title || pin.grid_title || "";
         // имя файла: название пина и id, чтобы его было легко узнать в папке
         const base = (title ? safeName(title, 60) + " - " : "") + pin.id;
+        const basePretty = (title ? safeName(title, 60, true) + " - " : "") + pin.id;
+        const slot = (k) => (media.length > 1 ? `_${String(k + 1).padStart(2, "0")}` : "");
         return {
           n: i + 1,
           id: String(pin.id),
           title,
           link: `https://www.pinterest.com/pin/${pin.id}/`,
-          media: media.map((m, k) => ({ ...m, stem: base + (media.length > 1 ? `_${String(k + 1).padStart(2, "0")}` : "") })),
+          media: media.map((m, k) => ({ ...m, stem: base + slot(k), stemPretty: basePretty + slot(k) })),
         };
       }),
     };

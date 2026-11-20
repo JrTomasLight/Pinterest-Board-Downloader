@@ -59,6 +59,12 @@ $("form").addEventListener("submit", (e) => {
   $("url").value = "";
 });
 $("open").addEventListener("click", () => chrome.runtime.sendMessage({ type: "open" }));
+// вкладка загрузок (открытая или новая) переключится на «Настройки»
+$("settings").addEventListener("click", async () => {
+  await chrome.storage.local.set({ showTab: { tab: "settings", at: Date.now() } });
+  chrome.runtime.sendMessage({ type: "open" });
+});
+PBD.watchTheme();
 $("ver").textContent = "v" + chrome.runtime.getManifest().version;
 $("repo").href = "https://github.com/JrTomasLight/Pinterest-Board-Downloader";
 

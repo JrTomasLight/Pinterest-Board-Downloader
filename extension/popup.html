@@ -5,9 +5,11 @@
 <style>
   [hidden] { display:none !important; }
   :root { --bg:#fff; --fg:#111; --muted:#666; --line:#ddd; --field:#f3f3f3; --accent:#e60023; --ok:#1a7f37; --ok-soft:#e3f4e8; }
+  /* тёмная тема: как в системе или выбрана в настройках (data-theme на <html>) */
   @media (prefers-color-scheme: dark) {
-    :root { --bg:#1d1d1d; --fg:#eee; --muted:#aaa; --line:#3a3a3a; --field:#2a2a2a; --ok:#5fd27a; --ok-soft:#163020; }
+    :root:not([data-theme="light"]) { --bg:#1d1d1d; --fg:#eee; --muted:#aaa; --line:#3a3a3a; --field:#2a2a2a; --ok:#5fd27a; --ok-soft:#163020; color-scheme:dark; }
   }
+  :root[data-theme="dark"] { --bg:#1d1d1d; --fg:#eee; --muted:#aaa; --line:#3a3a3a; --field:#2a2a2a; --ok:#5fd27a; --ok-soft:#163020; color-scheme:dark; }
   body { margin:0; width:330px; background:var(--bg); color:var(--fg); font:13px/1.4 system-ui, sans-serif; }
   main { padding:14px; }
   header { display:flex; align-items:center; gap:8px; margin:0 0 12px; }
@@ -29,7 +31,7 @@
   .upd { width:100%; margin:0 0 10px; padding:8px 12px; border-radius:12px; text-align:left;
          background:var(--ok-soft); color:var(--ok); border:1px solid var(--ok); font-weight:600; }
   .upd small { display:block; font-weight:400; color:var(--muted); }
-  footer { display:flex; justify-content:space-between; align-items:center; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
+  footer { display:flex; gap:12px; align-items:center; margin-top:12px; padding-top:10px; border-top:1px solid var(--line); }
   a.link { font-size:13px; }
   a.link:hover, .link:hover { color:var(--fg); }
 </style>
@@ -53,6 +55,8 @@
   <p id="error" class="err"></p>
   <footer>
     <button id="open" class="link">Открыть вкладку загрузок</button>
+    <button id="settings" class="link">Настройки</button>
+    <span style="flex:1"></span>
     <a id="repo" class="link" target="_blank" rel="noopener">GitHub</a>
   </footer>
 </main>

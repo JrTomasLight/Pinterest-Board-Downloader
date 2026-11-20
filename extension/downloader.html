@@ -11,13 +11,22 @@
     --chip:#f0f0ed; --accent:#e60023; --accent-soft:#fde7ea; --bar:#ececea;
     --ok:#1a7f37; --ok-soft:#e3f4e8; --warn:#a15c00; --shadow:0 1px 2px rgba(0,0,0,.04), 0 4px 16px rgba(0,0,0,.04);
   }
+  /* тёмная тема: как в системе или выбрана в настройках (data-theme на <html>) */
   @media (prefers-color-scheme: dark) {
-    :root {
+    :root:not([data-theme="light"]) {
       --bg:#0f0f0f; --surface:#1a1a1a; --fg:#ededed; --muted:#9c9c9c; --line:#2a2a2a;
       --chip:#262626; --accent-soft:#3a1219; --bar:#2c2c2c;
       --ok:#5fd27a; --ok-soft:#163020; --warn:#f0b35a; --shadow:none;
     }
   }
+  :root[data-theme="dark"] {
+    --bg:#0f0f0f; --surface:#1a1a1a; --fg:#ededed; --muted:#9c9c9c; --line:#2a2a2a;
+    --chip:#262626; --accent-soft:#3a1219; --bar:#2c2c2c;
+    --ok:#5fd27a; --ok-soft:#163020; --warn:#f0b35a; --shadow:none;
+  }
+  :root { color-scheme:light; }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) { color-scheme:dark; } }
+  :root[data-theme="dark"] { color-scheme:dark; }
   * { box-sizing:border-box; }
   [hidden] { display:none !important; } /* иначе display:flex у блоков перебивает атрибут hidden */
   body { margin:0; background:var(--bg); color:var(--fg); font:14px/1.5 system-ui, -apple-system, "Segoe UI", sans-serif; }
@@ -42,7 +51,8 @@
   .card { background:var(--surface); border:1px solid var(--line); border-radius:16px; box-shadow:var(--shadow); }
   button { font:inherit; border:0; border-radius:999px; padding:8px 16px; cursor:pointer; background:var(--chip); color:var(--fg); }
   button:hover:not(:disabled) { filter:brightness(.96); }
-  @media (prefers-color-scheme: dark) { button:hover:not(:disabled) { filter:brightness(1.2); } }
+  @media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) button:hover:not(:disabled) { filter:brightness(1.2); } }
+  :root[data-theme="dark"] button:hover:not(:disabled) { filter:brightness(1.2); }
   button.primary { background:var(--accent); color:#fff; font-weight:600; }
   button:disabled { opacity:.55; cursor:default; }
 
@@ -184,10 +194,34 @@
   .lib-row button { padding:5px 12px; font-size:13px; flex:none; }
   .lib-empty { color:var(--muted); text-align:center; padding:18px 0 8px; margin:0; }
 
+  /* настройки */
+  .set { padding:4px 16px; margin-bottom:12px; }
+  .set h3 { font-size:15px; margin:12px 0 2px; }
+  .opt { display:flex; align-items:center; gap:16px; padding:12px 0; border-top:1px solid var(--line); }
+  .set h3 + .opt { border-top:0; }
+  .opt > div { flex:1; min-width:0; }
+  .opt b { display:block; font-size:14px; }
+  .opt small { display:block; color:var(--muted); font-size:13px; line-height:1.45; margin-top:2px; }
+  .opt select { flex:none; font:inherit; color:var(--fg); background:var(--bg); border:1px solid var(--line);
+                border-radius:10px; padding:7px 10px; min-width:170px; cursor:pointer; }
+  .opt select:focus { outline:none; border-color:var(--accent); }
+  .sw { position:relative; flex:none; width:42px; height:24px; }
+  .sw input { position:absolute; inset:0; margin:0; opacity:0; cursor:pointer; z-index:1; }
+  .sw i { position:absolute; inset:0; border-radius:999px; background:var(--bar); border:1px solid var(--line); transition:background .15s; }
+  .sw i::after { content:""; position:absolute; top:2px; left:2px; width:18px; height:18px; border-radius:50%;
+                 background:#fff; box-shadow:0 1px 2px rgba(0,0,0,.3); transition:transform .15s; }
+  .sw input:checked + i { background:var(--accent); border-color:var(--accent); }
+  .sw input:checked + i::after { transform:translateX(18px); }
+  .sw input:focus-visible + i { outline:2px solid var(--accent); outline-offset:2px; }
+  .set-foot { display:flex; align-items:center; gap:12px; margin:4px 4px 0; }
+  .set-foot p { flex:1; margin:0; color:var(--muted); font-size:13px; }
+
   @media (max-width:480px) {
     header { flex-wrap:wrap; }
     .links-top { order:3; }
     .lib-row { flex-wrap:wrap; }
+    .opt { flex-wrap:wrap; }
+    .opt select { width:100%; }
   }
 </style>
 </head>
@@ -245,6 +279,7 @@
   <nav class="tabs">
     <button type="button" data-tab="loads" class="on">Загрузки</button>
     <button type="button" data-tab="library">Мои доски<span class="count" id="libCount"></span></button>
+    <button type="button" data-tab="settings">Настройки</button>
   </nav>
 
   <div id="tab-loads">
@@ -278,6 +313,80 @@
     </section>
   </div>
 
+  <div id="tab-settings" hidden>
+    <section class="card set">
+      <h3>Файлы и папки</h3>
+      <label class="opt">
+        <div><b>Файлов одновременно</b>
+          <small>Сколько файлов доски качается сразу. Если загрузка часто обрывается или мешает VPN — уменьшите.</small></div>
+        <select data-set="parallel">
+          <option value="1">1 — по одному</option><option value="2">2</option><option value="3">3</option>
+          <option value="4">4</option><option value="6">6 (по умолчанию)</option><option value="8">8</option><option value="10">10</option>
+        </select>
+      </label>
+      <label class="opt">
+        <div><b>Нумерация файлов</b>
+          <small>Номер пина на доске в начале имени: 0001_&lt;id&gt;.jpg — файлы в папке идут в порядке доски.
+            Без нумерации — &lt;id&gt;.jpg. Уже скачанные файлы переименуются при следующем скачивании доски.</small></div>
+        <span class="sw"><input type="checkbox" data-set="numbering"><i></i></span>
+      </label>
+      <label class="opt">
+        <div><b>Спецсимволы в названиях</b>
+          <small>Заменять ? : " &lt; &gt; / \ | * в названиях досок и разделов на похожие символы (？ ： ＂ ＜ ＞ ⧸ ⧹ ｜ ＊).
+            Если выключено — на «_». Папки уже скачанных досок переименуются при следующем скачивании.</small></div>
+        <span class="sw"><input type="checkbox" data-set="prettyNames"><i></i></span>
+      </label>
+      <label class="opt">
+        <div><b>Разделы доски</b>
+          <small>Одной папкой — пины всех разделов и доски подряд, со сплошной нумерацией. Уже скачанные файлы
+            переносятся, а не качаются заново. Раздел, скачанный отдельно, всегда в своей папке.</small></div>
+        <select data-set="sections">
+          <option value="folders">Отдельными папками</option><option value="flat">Одной папкой</option>
+        </select>
+      </label>
+      <label class="opt">
+        <div><b>Галерея</b>
+          <small>Страница _галерея/index.html: доска сеткой, открывается в браузере без интернета.
+            Служебные pins.json и board.json пишутся всегда — по ним работают «Мои доски» и повторное скачивание.</small></div>
+        <span class="sw"><input type="checkbox" data-set="gallery"><i></i></span>
+      </label>
+
+      <h3>Видео</h3>
+      <label class="opt">
+        <div><b>Видео в пинах</b>
+          <small>Только обложка — картинка вместо видео, чтобы папка весила меньше. Если потом выбрать «Скачивать»,
+            видео докачаются, а обложки вместо них удалятся.</small></div>
+        <select data-set="video">
+          <option value="video">Скачивать</option><option value="cover">Только обложку</option><option value="skip">Пропускать</option>
+        </select>
+      </label>
+      <label class="opt">
+        <div><b>Склеивать поток в .ts</b>
+          <small>У некоторых видео нет файла mp4, только поток. Включено — поток склеивается в .ts (открывается в VLC
+            и большинстве плееров). Выключено — вместо такого видео сохраняется обложка.</small></div>
+        <span class="sw"><input type="checkbox" data-set="hlsTs"><i></i></span>
+      </label>
+
+      <h3>Прочее</h3>
+      <label class="opt">
+        <div><b>Уведомления</b>
+          <small>Системное уведомление, когда загрузки закончились, а эта вкладка в фоне.</small></div>
+        <span class="sw"><input type="checkbox" data-set="notify"><i></i></span>
+      </label>
+      <label class="opt">
+        <div><b>Тема</b>
+          <small>Оформление вкладки загрузок и окна расширения.</small></div>
+        <select data-set="theme">
+          <option value="auto">Как в системе</option><option value="light">Светлая</option><option value="dark">Тёмная</option>
+        </select>
+      </label>
+    </section>
+    <div class="set-foot">
+      <p id="setNote">Настройки сохраняются сразу и действуют со следующей доски в очереди.</p>
+      <button id="setReset" type="button">Сбросить настройки</button>
+    </div>
+  </div>
+
   <footer>
     <p>Не закрывайте эту вкладку, пока идёт загрузка. Следующие доски и пины можно добавлять кнопкой расширения,
       кнопкой «Скачать» на пине или правой кнопкой мыши по пину. Они встанут в очередь.</p>
@@ -294,5 +403,6 @@
 <script src="update.js"></script>
 <script src="downloader.js"></script>
 <script src="library.js"></script>
+<script src="settings.js"></script>
 </body>
 </html>

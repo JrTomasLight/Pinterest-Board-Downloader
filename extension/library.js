@@ -56,15 +56,22 @@ function jobLabel(s) {
   return null;
 }
 
-// ------------------------------------------------------------ вкладки «Загрузки» / «Мои доски»
+// ------------------------------------------------------------ вкладки «Загрузки» / «Мои доски» / «Настройки»
+const TABS = ["loads", "library", "settings"];
 function showTab(name) {
+  if (!TABS.includes(name)) name = "loads";
   for (const b of document.querySelectorAll(".tabs button")) b.classList.toggle("on", b.dataset.tab === name);
-  $("tab-loads").hidden = name !== "loads";
-  $("tab-library").hidden = name !== "library";
+  for (const t of TABS) $("tab-" + t).hidden = name !== t;
   try { localStorage.setItem("tab", name); } catch { /* без запоминания */ }
   if (name === "library") openLibrary();
 }
 for (const b of document.querySelectorAll(".tabs button")) b.addEventListener("click", () => showTab(b.dataset.tab));
+
+// «Настройки» в окне расширения: открывает эту вкладку на нужном разделе (и уже открытую тоже)
+const takeTabRequest = (v) => v && Date.now() - (v.at || 0) < 10000 && TABS.includes(v.tab) && showTab(v.tab);
+chrome.storage.onChanged.addListener((ch, area) => {
+  if (area === "local" && ch.showTab) takeTabRequest(ch.showTab.newValue);
+});
 
 // ------------------------------------------------------------ поле ссылок
 const linksBox = $("links");
@@ -432,7 +439,10 @@ async function resolveMissing() {
     const boards = (r && r.boards) || [];
     for (const b of items) {
       b.resolving = false;
-      const hit = boards.find((x) => folderNameOf(`${b.user} - ${x.name}`).toLowerCase() === b.dir.toLowerCase());
+      // имя папки могло получиться с «_» или с похожими символами (настройка «Спецсимволы в именах»)
+      const dir = b.dir.toLowerCase();
+      const hit = boards.find((x) => [false, true].some((pretty) =>
+        folderNameOf(`${b.user} - ${x.name}`, 80, pretty).toLowerCase() === dir));
       if (hit) await remember(b, { url: hit.url, id: hit.id, title: hit.name });
       else b.unresolved = true;
     }
@@ -494,5 +504,7 @@ chrome.storage.onChanged.addListener((ch, area) => {
     root = root || saved;
     await loadLibrary();
   }
-  showTab(tab === "library" ? "library" : "loads");
+  showTab(tab);
+  const { showTab: req } = await chrome.storage.local.get("showTab");
+  takeTabRequest(req);
 })();
