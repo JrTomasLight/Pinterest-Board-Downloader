@@ -2,6 +2,8 @@
 // (без окна «Сохранить как» на каждый файл).
 
 const PARALLEL = 4;
+// найдено меньше этой доли пинов доски — считаем, что Pinterest показал не все, и ничего не убираем
+const PARTIAL_SHARE = 0.8;
 const FILE_OPS_PARALLEL = 8; // одновременных переименований и переносов при сверке
 
 // выполняет fn для каждого элемента, не больше limit одновременно
@@ -119,7 +121,42 @@ function getDir(path) {
 }
 
 const REMOVED_DIR = "_убраны с доски";
-const GALLERY_DIR = "_галерея"; // index.html и pins.json
+const GALLERY_DIR = "_галерея"; // index.html, pins.json и board.json
+
+// Пояснения внутри служебных папок: что это за папка и откуда в ней файлы.
+// В начале — метка UTF-8 (BOM), чтобы старый Блокнот Windows не показал кириллицу кракозябрами.
+const README_TXT = "readme.txt";
+const GALLERY_README = `Папка «${GALLERY_DIR}» — служебная, её создаёт расширение Pinterest Board Downloader.
+
+index.html — просмотр доски в браузере так же, как на сайте, вместе с видео. Откройте его двойным щелчком.
+  Картинки он берёт из папки доски по именам файлов, поэтому не переименовывайте и не перемещайте их вручную.
+pins.json — список пинов доски по порядку: номер, id пина, название, ссылка и имена файлов.
+board.json — ссылка на доску на Pinterest. По ней доска видна в списке «Мои доски» во вкладке загрузок
+  и обновляется кнопкой «Обновить».
+
+Эти файлы переписываются при каждом скачивании доски. Если папку удалить, ничего не сломается:
+при следующем скачивании она появится снова, но до тех пор доски не будет в списке «Мои доски».
+`;
+const REMOVED_README = `Папка «${REMOVED_DIR}» — сюда расширение Pinterest Board Downloader переносит файлы,
+которые больше не нужны в папке доски. Само оно отсюда ничего не удаляет: что делать с этими файлами, решаете вы.
+
+Как сюда попадают файлы
+- Пин убрали с доски (вы сами или его удалил автор). При следующем скачивании доски его файл переносится сюда.
+- У одного пина в папке доски оказалось несколько разных файлов. На месте остаётся файл с правильным номером,
+  а лишний переносится сюда. Точные копии расширение удаляет само и сюда не кладёт.
+
+Почему здесь может оказаться пин, который на доске есть
+- Это лишняя копия файла. Такие копии появлялись в версиях до 1.4.0 из-за ошибок при обновлении доски,
+  например когда доску одновременно сверяли несколько вкладок загрузок. Сам пин при этом лежит в папке доски
+  под своим нынешним номером: найдите файл с тем же id — это длинное число после номера в имени файла.
+  Копию отсюда можно удалить.
+- Pinterest показал не все пины доски: вы не вошли в аккаунт, мешал VPN или сайт отвечал с ошибками.
+  Тогда расширение сочло часть пинов убранными. Войдите в аккаунт и скачайте доску ещё раз:
+  такие пины скачаются заново, а файлы отсюда можно будет удалить.
+
+Имя файла: <номер на доске на момент переноса>_<id пина>. Пин на Pinterest: https://www.pinterest.com/pin/<id пина>/
+`;
+const writeReadme = (dir, text) => writeText(dir, README_TXT, "\uFEFF" + text.replace(/\n/g, "\r\n"));
 const NUM = /^\d+_/;           // номер позиции в начале имени файла
 const restOf = (stem) => stem.replace(NUM, ""); // id пина (+ _01 для карусели) без номера
 
@@ -229,14 +266,22 @@ async function syncSingles(folder, dir, stats) {
   return jobs;
 }
 
-async function syncFolder(folder, dir, stats, step = () => {}) {
+// keepMissing — Pinterest показал не все пины доски: файлы пинов, которых нет в списке, оставляем на месте,
+// а не переносим в «_убраны с доски» (скорее всего, они с доски никуда не делись)
+async function syncFolder(folder, dir, stats, step = () => {}, keepMissing = false) {
   if (folder.single) return syncSingles(folder, dir, stats);
   const have = await existingPinFiles(dir, step);
   const jobs = [];
   let removedDir = null;
+  const openRemoved = async () => {
+    if (!removedDir) {
+      removedDir = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
+      await writeReadme(removedDir, REMOVED_README);
+    }
+    return removedDir;
+  };
   const putAway = async (name) => {
-    removedDir ??= await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
-    await moveFile(dir, name, removedDir, name);
+    await moveFile(dir, name, await openRemoved(), name);
     stats.removed++;
   };
 
@@ -263,7 +308,9 @@ async function syncFolder(folder, dir, stats, step = () => {}) {
   // Делаем их по несколько сразу: файлы разных пинов друг другу не мешают.
   // Лишние файлы того же пина (например, после двух сверок наперегонки): точная копия оставленного
   // файла удаляется, а отличающийся файл убирается вместе с пинами, которых больше нет на доске.
-  const away = [...have.values()].flat();
+  const missing = [...have.values()].flat();
+  const away = keepMissing ? [] : missing;
+  if (keepMissing) stats.kept += missing.length;
   const sizeOf = async (name) => (await (await dir.getFileHandle(name)).getFile()).size;
   await pool(renames.filter((r) => r.extra.length), FILE_OPS_PARALLEL, async (r) => {
     const keepSize = await sizeOf(r.keep);
@@ -277,7 +324,7 @@ async function syncFolder(folder, dir, stats, step = () => {}) {
     }
     step(`Убираю повторяющиеся файлы пинов: удалено ${stats.dupes}`);
   });
-  if (away.length) removedDir = await dir.getDirectoryHandle(REMOVED_DIR, { create: true });
+  if (away.length) await openRemoved(); // до параллельных переносов, чтобы папка создалась один раз
   let n = 0;
   await pool(away, FILE_OPS_PARALLEL, async (name) => {
     await putAway(name);
@@ -540,10 +587,13 @@ function boardView(board, onCancel) {
     cancelBtn.textContent = "Отменяю…";
     onCancel();
   });
-  if (board.gated) {
+  if (board.expected && board.found < board.expected * PARTIAL_SHARE) {
     const w = document.createElement("p");
     w.className = "warn";
-    w.textContent = `Найдено только ${board.found} из ${board.expected} пинов — похоже, вы не вошли в аккаунт Pinterest.`;
+    w.textContent = `Найдено только ${board.found} из ${board.expected} пинов — ` +
+      (board.gated ? "похоже, вы не вошли в аккаунт Pinterest. " : "возможно, мешал VPN или Pinterest отвечал с ошибками. ") +
+      `Уже скачанные файлы остальных пинов остаются на месте, а не переносятся в «${REMOVED_DIR}». ` +
+      "Войдите в аккаунт и скачайте доску ещё раз.";
     el.append(w);
   }
   const noteEl = document.createElement("p");
@@ -592,7 +642,9 @@ async function downloadBoard(board, view) {
   const signal = activeSignal || new AbortController().signal;
   view.status("Сверяю с уже скачанным…");
   dirCache.clear(); // папки разделов могли переименоваться
-  const stats = { total: 0, done: 0, renamed: 0, removed: 0, dupes: 0 };
+  const stats = { total: 0, done: 0, renamed: 0, removed: 0, dupes: 0, kept: 0 };
+  // Pinterest отдал заметно меньше пинов, чем на доске (не вошли в аккаунт, мешал VPN, сбой сайта)
+  const partial = !!(board.expected && board.found < board.expected * PARTIAL_SHARE);
   const jobs = [];
   // сверка большой доски может идти долго — показываем каждый шаг, а не одну надпись
   let lastStep = 0;
@@ -608,7 +660,7 @@ async function downloadBoard(board, view) {
     if (folder.skip) continue; // скачивается один раздел — корень доски не трогаем
     checkCancel();
     if (board.folders.length > 1) view.status(`Сверяю с уже скачанным: «${folder.title}»…`);
-    jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats, step)));
+    jobs.push(...(await syncFolder(folder, await getDir(folder.path), stats, step, partial)));
   }
   const total = stats.total;
   let done = stats.done, failed = 0;
@@ -617,6 +669,7 @@ async function downloadBoard(board, view) {
   if (stats.renamed) notes.push(`перенумеровано: ${stats.renamed}`);
   if (stats.removed) notes.push(`убрано в «${REMOVED_DIR}»: ${stats.removed}`);
   if (stats.dupes) notes.push(`удалено одинаковых копий: ${stats.dupes}`);
+  if (stats.kept) notes.push(`оставлено на месте (Pinterest показал не все пины): ${stats.kept}`);
   if (jobs.length) notes.push(`новых: ${jobs.length}`);
   view.note(notes.join(", "));
   view.update(done, total, failed);
@@ -648,6 +701,7 @@ async function downloadBoard(board, view) {
       try { await dir.removeEntry(old); } catch { /* нет такого */ }
     }
     const gallery = await dir.getDirectoryHandle(GALLERY_DIR, { create: true });
+    await writeReadme(gallery, GALLERY_README);
     await writeText(gallery, "index.html", indexHtml(folder));
     const list = folder.pins.map((p) => ({ n: p.n, id: p.id, title: p.title, link: p.link, files: p.files.filter(Boolean) }));
     await writeText(gallery, "pins.json", JSON.stringify(list, null, 1));
